@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -137,14 +138,14 @@ func (m *hostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	s := msg.String()
 	if m.search {
-		return m.handleSearch(s)
+		return m.handleSearch(msg)
 	}
-	return m.handleNormal(s)
+	return m.handleNormal(msg.String())
 }
 
-func (m *hostModel) handleSearch(s string) (tea.Model, tea.Cmd) {
+func (m *hostModel) handleSearch(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
 	switch s {
 	case "enter":
 		if len(m.filtered) > 0 {
@@ -169,11 +170,32 @@ func (m *hostModel) handleSearch(s string) (tea.Model, tea.Cmd) {
 			m.applyFilter()
 		}
 		return m, nil
+	case "up", "shift+tab":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+	case "down", "tab":
+		if m.cursor < len(m.filtered)-1 {
+			m.cursor++
+		}
+		return m, nil
+	case "left", "pgup":
+		m.pageMove(-1)
+		return m, nil
+	case "right", "pgdown":
+		m.pageMove(1)
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
 	default:
-		if len(s) == 1 && s[0] < 0x20 {
+		txt := msg.Key().Text
+		if txt == "" {
 			return m, nil
 		}
-		m.filter = append(m.filter, s...)
+		m.filter = append(m.filter, txt...)
 		m.applyFilter()
 		m.clampCursor()
 		return m, nil
@@ -376,7 +398,10 @@ func (m *hostModel) View() tea.View {
 	// --- separator ---
 	b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
-	availableHeight := m.height - 10
+	// Pre-count detail lines so the list + details + chrome always fit in the terminal.
+	// Fixed chrome: top_border(1)+title(1)+sep(1)+filter(1)+sep(1)+sep(1)+bottom_border(1)+action(1)+status(1) = 9
+	detailLines := m.countDetailLines()
+	availableHeight := m.height - 9 - detailLines
 	if availableHeight < 3 {
 		availableHeight = 3
 	}
@@ -401,9 +426,9 @@ func (m *hostModel) View() tea.View {
 	// --- separator ---
 	b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
-	// --- details ---
+	// --- details (limited to detailLines so we never overflow) ---
 	if m.cursor >= 0 && m.cursor < len(m.filtered) {
-		m.renderDetails(&b, m.filtered[m.cursor])
+		m.renderDetails(&b, m.filtered[m.cursor], detailLines)
 	}
 
 	// --- bottom border ---
@@ -431,7 +456,8 @@ func (m *hostModel) View() tea.View {
 }
 
 func (m *hostModel) bgLine(s string) string {
-	w := runewidth.StringWidth(s)
+	// Use lipgloss.Width which strips ANSI escape codes before measuring.
+	w := lipgloss.Width(s)
 	if w < m.width {
 		s += strings.Repeat(" ", m.width-w)
 	}
@@ -466,17 +492,65 @@ func (m *hostModel) renderHost(b *strings.Builder, h *sshHost, isActive bool) {
 	if h.GroupLabels != "" {
 		line += m.labelStyle.Render(fmt.Sprintf("  [%s]", h.GroupLabels))
 	}
-	b.WriteString(m.bgLine(clipString(line, m.width-1)) + "\n")
+	// ansi.Truncate is ANSI-aware: it measures visible width only, preserving colour codes.
+	if lipgloss.Width(line) > m.width-1 {
+		line = ansi.Truncate(line, m.width-1, "")
+	}
+	b.WriteString(m.bgLine(line) + "\n")
 }
 
-func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost) {
+// countDetailLines returns how many non-empty detail lines the current host would render.
+func (m *hostModel) countDetailLines() int {
+	if m.cursor < 0 || m.cursor >= len(m.filtered) {
+		return 0
+	}
+	h := m.filtered[m.cursor]
+	count := 0
+	for _, item := range getPromptDetailItems() {
+		var value string
+		switch strings.ToLower(item) {
+		case "alias":
+			value = h.Alias
+		case "host":
+			value = h.Host
+		case "port":
+			if h.Port != "" && h.Port != "22" {
+				value = h.Port
+			}
+		case "user":
+			value = h.User
+		case "grouplabels":
+			value = h.GroupLabels
+		case "identityfile":
+			value = h.IdentityFile
+		case "proxycommand":
+			value = h.ProxyCommand
+		case "proxyjump":
+			value = h.ProxyJump
+		case "remotecommand":
+			value = h.RemoteCommand
+		default:
+			value = getExConfig(h.Alias, item)
+		}
+		if value != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost, maxLines int) {
 	items := getPromptDetailItems()
 	width := m.width - 2
 	if width < 20 {
 		width = 20
 	}
 
+	written := 0
 	for _, item := range items {
+		if maxLines > 0 && written >= maxLines {
+			break
+		}
 		var value string
 		switch strings.ToLower(item) {
 		case "alias":
@@ -506,6 +580,7 @@ func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost) {
 			line := fmt.Sprintf("  %s:  %s", item, value)
 			line = clipString(line, width)
 			b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
+			written++
 		}
 	}
 }

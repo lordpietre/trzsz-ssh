@@ -43,6 +43,7 @@ import (
 )
 
 var kDefaultConnectTimeout = 10 * time.Second
+var kDefaultServerAliveInterval uint32 = 30
 
 type proxyJump struct {
 	client SshClient
@@ -696,18 +697,23 @@ func sshLogin(param *sshParam, proxy *proxyJump, requireUDP udpModeType) (SshCli
 }
 
 func keepAlive(sshConn *sshConnection) {
+	aliveIntervalStr := getOptionConfig(sshConn.param.args, "ServerAliveInterval")
 	serverAliveInterval := uint32(0)
-	if c := getOptionConfig(sshConn.param.args, "ServerAliveInterval"); c != "" {
-		v, err := strconv.ParseUint(c, 10, 32)
+	if aliveIntervalStr != "" {
+		v, err := strconv.ParseUint(aliveIntervalStr, 10, 32)
 		if err != nil {
-			warning("ServerAliveInterval [%s] is invalid: %v", c, err)
+			warning("ServerAliveInterval [%s] is invalid: %v", aliveIntervalStr, err)
 		} else {
 			serverAliveInterval = uint32(v)
 		}
 	}
 	if serverAliveInterval == 0 {
-		debug("no keep alive for [%s]", sshConn.param.args.Destination)
-		return
+		if aliveIntervalStr == "" {
+			serverAliveInterval = kDefaultServerAliveInterval
+		} else {
+			debug("no keep alive for [%s]", sshConn.param.args.Destination)
+			return
+		}
 	}
 
 	serverAliveCountMax := uint32(3)

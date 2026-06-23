@@ -86,11 +86,12 @@ type tsshConfig struct {
 	promptDefaultMode     string
 	promptDetailItems     string
 	promptCursorIcon      string
-	promptSelectedIcon    string
-	setTerminalTitle      string
-	loadConfig            sync.Once
-	loadExConfig          sync.Once
-	loadHosts             sync.Once
+	promptSelectedIcon         string
+	defaultServerAliveInterval uint32
+	setTerminalTitle           string
+	loadConfig                 sync.Once
+	loadExConfig               sync.Once
+	loadHosts                  sync.Once
 	config                *ssh_config.Config
 	sysConfig             *ssh_config.Config
 	exConfig              *ssh_config.Config
@@ -202,6 +203,13 @@ func parseTsshConfig() {
 			userConfig.promptSelectedIcon = value
 		case name == "setterminaltitle" && userConfig.setTerminalTitle == "":
 			userConfig.setTerminalTitle = value
+		case name == "defaultserveraliveinterval" && userConfig.defaultServerAliveInterval == 0:
+			v, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
+				warning("DefaultServerAliveInterval [%s] is invalid: %v", value, err)
+			} else {
+				userConfig.defaultServerAliveInterval = uint32(v)
+			}
 		}
 	}
 
@@ -265,6 +273,9 @@ func showTsshConfig() {
 	}
 	if userConfig.setTerminalTitle != "" {
 		debug("SetTerminalTitle = %s", userConfig.setTerminalTitle)
+	}
+	if userConfig.defaultServerAliveInterval != 0 {
+		debug("DefaultServerAliveInterval = %d", userConfig.defaultServerAliveInterval)
 	}
 }
 
@@ -809,7 +820,7 @@ func getPromptPageSize() int {
 func getPromptDetailItems() []string {
 	promptDetailItems := userConfig.promptDetailItems
 	if promptDetailItems == "" {
-		promptDetailItems = "Alias Host Port User GroupLabels IdentityFile ProxyCommand ProxyJump RemoteCommand UdpMode TsshdPath"
+		promptDetailItems = "Alias Host Port User GroupLabels IdentityFile ProxyCommand ProxyJump RemoteCommand ServerAliveInterval UdpMode TsshdPath"
 	}
 	return strings.Fields(promptDetailItems)
 }

@@ -25,12 +25,19 @@ type hostChoiceMsg struct {
 	newHost    bool
 	editConfig bool
 	download   *downloadReq
+	upload     *uploadReq
 }
 
 type downloadReq struct {
 	alias        string
 	remotePaths  string
 	localPath    string
+}
+
+type uploadReq struct {
+	alias        string
+	localPaths   string
+	remotePath   string
 }
 
 type actionItem struct {
@@ -44,12 +51,13 @@ type contextItem struct {
 }
 
 type tunnelEntry struct {
-	Alias      string `json:"alias"`
-	LocalPort  string `json:"local_port"`
-	RemotePort string `json:"remote_port"`
-	Mode       string `json:"mode"` // "manual" or "auto"
-	Active     bool   `json:"-"`
-	Cmd        *exec.Cmd `json:"-"`
+	Alias       string `json:"alias"`
+	LocalPort   string `json:"local_port"`
+	RemotePort  string `json:"remote_port"`
+	ForwardType string `json:"forward_type"` // "L" (local), "R" (remote), "D" (dynamic)
+	Mode        string `json:"mode"` // "manual" or "auto"
+	Active      bool   `json:"-"`
+	Cmd         *exec.Cmd `json:"-"`
 }
 
 type portInfo struct {
@@ -66,9 +74,10 @@ type tunnelState struct {
 	active           bool
 	view             string // "menu", "manual_form", "auto_scanning", "auto_results", "form_ask_local"
 	alias            string
+	forwardType      string // "L", "R", "D"
 	manualRemote     string
 	manualLocal      string
-	formField        int    // 0=remote, 1=local
+	formField        int    // 0=type, 1=port1, 2=port2
 	scanPorts        []portInfo
 	scanCursor       int
 	scanErr          string
@@ -140,6 +149,20 @@ type downloadState struct {
 	err    string
 }
 
+type uploadField struct {
+	label string
+	value string
+	kind  string // "text" or "path"
+}
+
+type uploadState struct {
+	active bool
+	fields []uploadField
+	cursor int
+	alias  string
+	err    string
+}
+
 type configField struct {
 	key   string // config key name (lowercase)
 	label string
@@ -176,6 +199,7 @@ type hostModel struct {
 	newHost            newHostState
 	config             configState
 	download           downloadState
+	upload             uploadState
 	groups             groupsState
 	groupPicker        groupPickerState
 	deleteAsk          bool
@@ -307,6 +331,21 @@ func (m *hostModel) getContextItems() []contextItem {
 			m.download.fields = []downloadField{
 				{"Remote paths (space-separated)", "", "text"},
 				{"Local download path", userConfig.defaultDownloadPath, "path"},
+			}
+			return m, nil
+		}},
+		{"Upload", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			if alias == "" {
+				return m, nil
+			}
+			m.upload.active = true
+			m.upload.cursor = 0
+			m.upload.alias = alias
+			m.upload.err = ""
+			m.upload.fields = []uploadField{
+				{"Local paths (space-separated)", "", "text"},
+				{"Remote upload path", "", "path"},
 			}
 			return m, nil
 		}},
@@ -541,6 +580,9 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.download.active {
 		return m.handleDownload(msg)
 	}
+	if m.upload.active {
+		return m.handleUpload(msg)
+	}
 	if m.groupPicker.active {
 		return m.handleGroupPicker(msg)
 	}
@@ -664,6 +706,7 @@ func (m *hostModel) handleTunnelMenu(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case 0:
 			m.tunnel.view = "manual_form"
 			m.tunnel.formField = 0
+			m.tunnel.forwardType = ""
 			m.tunnel.manualRemote = ""
 			m.tunnel.manualLocal = ""
 		case 1:
@@ -699,25 +742,39 @@ func (m *hostModel) handleTunnelManualForm(msg tea.KeyPressMsg) (tea.Model, tea.
 	txt := msg.Key().Text
 	switch s {
 	case "tab", "down", "j":
-		m.tunnel.formField = (m.tunnel.formField + 1) % 2
+		m.tunnel.formField = (m.tunnel.formField + 1) % 3
 		return m, nil
 	case "shift+tab", "up", "k":
-		m.tunnel.formField = (m.tunnel.formField + 1) % 2
+		m.tunnel.formField = (m.tunnel.formField + 2) % 3
 		return m, nil
 	case "enter":
-		if m.tunnel.manualRemote == "" || m.tunnel.manualLocal == "" {
+		if m.tunnel.forwardType == "" {
+			m.tunnel.forwardType = "L"
+		}
+		if m.tunnel.forwardType == "D" {
+			if m.tunnel.manualLocal == "" {
+				return m, nil
+			}
+		} else if m.tunnel.manualRemote == "" || m.tunnel.manualLocal == "" {
 			return m, nil
 		}
-		_, retCmd := tunnelStartProcess(m.tunnel.alias, m.tunnel.manualLocal, m.tunnel.manualRemote, "manual")
+		_, retCmd := tunnelStartProcess(m.tunnel.alias, m.tunnel.manualLocal, m.tunnel.manualRemote, m.tunnel.forwardType, "manual")
 		return m, retCmd
 	case "esc":
 		m.tunnel.view = "menu"
 		return m, nil
 	case "backspace":
-		if m.tunnel.formField == 0 && len(m.tunnel.manualRemote) > 0 {
-			m.tunnel.manualRemote = m.tunnel.manualRemote[:len(m.tunnel.manualRemote)-1]
-		} else if m.tunnel.formField == 1 && len(m.tunnel.manualLocal) > 0 {
-			m.tunnel.manualLocal = m.tunnel.manualLocal[:len(m.tunnel.manualLocal)-1]
+		switch m.tunnel.formField {
+		case 0:
+			m.tunnel.forwardType = ""
+		case 1:
+			if len(m.tunnel.manualRemote) > 0 {
+				m.tunnel.manualRemote = m.tunnel.manualRemote[:len(m.tunnel.manualRemote)-1]
+			}
+		case 2:
+			if len(m.tunnel.manualLocal) > 0 {
+				m.tunnel.manualLocal = m.tunnel.manualLocal[:len(m.tunnel.manualLocal)-1]
+			}
 		}
 		return m, nil
 	case "ctrl+c", "ctrl+q":
@@ -728,12 +785,25 @@ func (m *hostModel) handleTunnelManualForm(msg tea.KeyPressMsg) (tea.Model, tea.
 		if txt == "" {
 			return m, nil
 		}
-		for _, r := range txt {
-			if r >= '0' && r <= '9' {
-				if m.tunnel.formField == 0 {
-					m.tunnel.manualRemote += string(r)
-				} else {
-					m.tunnel.manualLocal += string(r)
+		if m.tunnel.formField == 0 {
+			for _, r := range txt {
+				c := string(r)
+				if c == "L" || c == "l" {
+					m.tunnel.forwardType = "L"
+				} else if c == "R" || c == "r" {
+					m.tunnel.forwardType = "R"
+				} else if c == "D" || c == "d" {
+					m.tunnel.forwardType = "D"
+				}
+			}
+		} else {
+			for _, r := range txt {
+				if r >= '0' && r <= '9' {
+					if m.tunnel.formField == 1 {
+						m.tunnel.manualRemote += string(r)
+					} else {
+						m.tunnel.manualLocal += string(r)
+					}
 				}
 			}
 		}
@@ -813,7 +883,7 @@ func (m *hostModel) handleTunnelAskLocal(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		if m.tunnel.manualLocal == "" {
 			return m, nil
 		}
-		_, retCmd := tunnelStartProcess(m.tunnel.alias, m.tunnel.manualLocal, fmt.Sprintf("%d", m.tunnel.askLocalRemote), "auto")
+		_, retCmd := tunnelStartProcess(m.tunnel.alias, m.tunnel.manualLocal, fmt.Sprintf("%d", m.tunnel.askLocalRemote), "L", "auto")
 		return m, retCmd
 	case "esc":
 		m.tunnel.view = "auto_results"
@@ -1167,6 +1237,8 @@ func (m *hostModel) View() tea.View {
 		m.renderConfigView(&b, availableHeight+detailLines+2)
 	} else if m.download.active {
 		m.renderDownloadView(&b, availableHeight+detailLines+2)
+	} else if m.upload.active {
+		m.renderUploadView(&b, availableHeight+detailLines+2)
 	} else if m.groups.active {
 		m.renderGroupsView(&b, availableHeight+detailLines+2)
 	} else if m.deleteAsk {
@@ -1288,6 +1360,8 @@ func (m *hostModel) View() tea.View {
 		statusStr = "  Groups  "
 	} else if m.download.active {
 		statusStr = "  Download from " + m.download.alias + "  "
+	} else if m.upload.active {
+		statusStr = "  Upload to " + m.upload.alias + "  "
 	} else if m.config.active {
 		if m.config.saved {
 			statusStr = "  Config saved — restart to apply  "
@@ -1597,7 +1671,11 @@ func (m *hostModel) renderTunnelMenu(b *strings.Builder, maxLines int) {
 	if len(m.tunnel.tunnels) > 0 {
 		b.WriteString(m.bgLine("  Saved tunnels:") + "\n")
 		for i, t := range m.tunnel.tunnels {
-			line := fmt.Sprintf("  · :%s → localhost:%s (%s)", t.LocalPort, t.RemotePort, t.Mode)
+			fwdType := t.ForwardType
+		if fwdType == "" {
+			fwdType = "L"
+		}
+		line := fmt.Sprintf("  · [%s] :%s → localhost:%s (%s)", fwdType, t.LocalPort, t.RemotePort, t.Mode)
 			if t.Active {
 				line += " [ACTIVE]"
 			}
@@ -1653,26 +1731,44 @@ func (m *hostModel) renderTunnelManualForm(b *strings.Builder, maxLines int) {
 	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
 	b.WriteString(m.bgLine("") + "\n")
 
-	// remote port
-	remoteLabel := "  Remote Port: "
+	// forward type
+	fwdType := m.tunnel.forwardType
+	if fwdType == "" {
+		fwdType = "L"
+	}
+	typeLabel := fmt.Sprintf("  Type (L/R/D): %s", fwdType)
 	if m.tunnel.formField == 0 {
-		b.WriteString(m.bgLine(m.activeStyle.Render(remoteLabel + m.tunnel.manualRemote + "▌")) + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+typeLabel+"▌")) + "\n")
 	} else {
-		b.WriteString(m.bgLine(remoteLabel + m.tunnel.manualRemote) + "\n")
+		b.WriteString(m.bgLine("   " + typeLabel) + "\n")
 	}
 
-	// local port
-	localLabel := "  Local Port:  "
+	// port 1 (remote for L, local for R, unused for D)
+	port1Label := "  Remote Port:  "
+	if m.tunnel.forwardType == "R" {
+		port1Label = "  Local Port:   "
+	}
 	if m.tunnel.formField == 1 {
-		b.WriteString(m.bgLine(m.activeStyle.Render(localLabel + m.tunnel.manualLocal + "▌")) + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render(port1Label + m.tunnel.manualRemote + "▌")) + "\n")
 	} else {
-		b.WriteString(m.bgLine(localLabel + m.tunnel.manualLocal) + "\n")
+		b.WriteString(m.bgLine(port1Label + m.tunnel.manualRemote) + "\n")
+	}
+
+	// port 2 (local for L/R, SOCKS5 port for D)
+	port2Label := "  Local Port:   "
+	if m.tunnel.forwardType == "D" {
+		port2Label = "  SOCKS5 Port:  "
+	}
+	if m.tunnel.formField == 2 {
+		b.WriteString(m.bgLine(m.activeStyle.Render(port2Label + m.tunnel.manualLocal + "▌")) + "\n")
+	} else {
+		b.WriteString(m.bgLine(port2Label + m.tunnel.manualLocal) + "\n")
 	}
 
 	b.WriteString(m.bgLine("") + "\n")
 	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to create  Esc to cancel  Tab to switch field")) + "\n")
 
-	for i := 5; i < maxLines; i++ {
+	for i := 6; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 }
@@ -2320,30 +2416,43 @@ func tunnelScanRemote(alias string) tea.Cmd {
 	}
 }
 
-func tunnelStartProcess(alias, localPort, remotePort, mode string) (tea.Model, tea.Cmd) {
+func tunnelStartProcess(alias, localPort, remotePort, forwardType, mode string) (tea.Model, tea.Cmd) {
 	sshPath, _ := exec.LookPath("ssh")
 	if sshPath == "" {
 		return nil, func() tea.Msg {
 			return tunnelStartMsg{err: fmt.Errorf("ssh not found in PATH")}
 		}
 	}
+	if forwardType == "" {
+		forwardType = "L"
+	}
 	entry := &tunnelEntry{
-		Alias:      alias,
-		LocalPort:  localPort,
-		RemotePort: remotePort,
-		Mode:       mode,
+		Alias:       alias,
+		LocalPort:   localPort,
+		RemotePort:  remotePort,
+		ForwardType: forwardType,
+		Mode:        mode,
 	}
 	configPath := userConfig.configPath
 	return nil, func() tea.Msg {
-		cmd := exec.Command(sshPath,
-			"-F", configPath,
+		var args []string
+		args = append(args, "-F", configPath,
 			"-o", "BatchMode=yes",
 			"-o", "ExitOnForwardFailure=yes",
 			"-o", "ConnectTimeout=10",
 			"-o", "ServerAliveInterval=30",
 			"-o", "ServerAliveCountMax=3",
-			"-NL", localPort+":localhost:"+remotePort,
-			alias)
+		)
+		switch forwardType {
+		case "R":
+			args = append(args, "-NR", remotePort+":localhost:"+localPort)
+		case "D":
+			args = append(args, "-ND", localPort)
+		default:
+			args = append(args, "-NL", localPort+":localhost:"+remotePort)
+		}
+		args = append(args, alias)
+		cmd := exec.Command(sshPath, args...)
 		// Start the process
 		if err := cmd.Start(); err != nil {
 			return tunnelStartMsg{entry: entry, err: fmt.Errorf("tunnel start failed: %v", err)}
@@ -2373,6 +2482,9 @@ func buildEditFields(alias string) []editField {
 	host, port, user := resolveHostPortUser(alias)
 	pw := getExConfig(alias, "Password")
 	group := getGroupLabels(alias)
+	idFile := getConfig(alias, "IdentityFile")
+	proxyJump := getConfig(alias, "ProxyJump")
+	remoteCmd := getConfig(alias, "RemoteCommand")
 	return []editField{
 		{"Alias", alias, "", "text"},
 		{"HostName", host, "HostName", "text"},
@@ -2380,6 +2492,9 @@ func buildEditFields(alias string) []editField {
 		{"User", user, "User", "text"},
 		{"Password", pw, "Password", "password"},
 		{"Group", group, "", "group"},
+		{"IdentityFile", idFile, "IdentityFile", "text"},
+		{"ProxyJump", proxyJump, "ProxyJump", "text"},
+		{"RemoteCommand", remoteCmd, "RemoteCommand", "text"},
 	}
 }
 
@@ -2407,6 +2522,12 @@ func buildConfigFields() []configField {
 	if lang == "" {
 		lang = "english"
 	}
+	configPath := userConfig.configPath
+	exConfigPath := userConfig.exConfigPath
+	useOpenSSH := "no"
+	if userConfig.useOpenSSHConfig {
+		useOpenSSH = "yes"
+	}
 	return []configField{
 		{"defaultserveraliveinterval", "ServerAliveInterval (0=off)", alive, "number"},
 		{"setterminaltitle", "Set terminal title", title, "bool"},
@@ -2416,6 +2537,9 @@ func buildConfigFields() []configField {
 		{"promptdefaultmode", "Default mode (search/normal)", mode, "text"},
 		{"promptpagesize", "Page size", pageSize, "number"},
 		{"language", "Language (english/chinese)", lang, "text"},
+		{"configpath", "Config path", configPath, "text"},
+		{"exconfigpath", "ExConfig path", exConfigPath, "text"},
+		{"useopensshconfig", "Use OpenSSH config (yes/no)", useOpenSSH, "bool"},
 	}
 }
 
@@ -2518,6 +2642,12 @@ func (m *hostModel) writeTsshConfig() error {
 				lines = append(lines, fmt.Sprintf("PromptPageSize = %s", val))
 			case "language":
 				lines = append(lines, fmt.Sprintf("Language = %s", val))
+			case "configpath":
+				lines = append(lines, fmt.Sprintf("ConfigPath = %s", val))
+			case "exconfigpath":
+				lines = append(lines, fmt.Sprintf("ExConfigPath = %s", val))
+			case "useopensshconfig":
+				lines = append(lines, fmt.Sprintf("UseOpenSSHConfig = %s", val))
 			}
 		}
 	}
@@ -2664,6 +2794,97 @@ func (m *hostModel) renderDownloadView(b *strings.Builder, maxLines int) {
 
 	used := len(m.download.fields) + 3
 	if m.download.err != "" {
+		used += 2
+	}
+	for i := used; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) handleUpload(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "up", "k", "shift+tab":
+		if m.upload.cursor > 0 {
+			m.upload.cursor--
+		}
+		return m, nil
+	case "down", "j", "tab":
+		if m.upload.cursor < len(m.upload.fields)-1 {
+			m.upload.cursor++
+		}
+		return m, nil
+	case "enter":
+		paths := m.upload.fields[0].value
+		if paths == "" {
+			m.upload.err = "Local paths are required"
+			return m, nil
+		}
+		m.done = true
+		m.result = hostChoiceMsg{
+			upload: &uploadReq{
+				alias:      m.upload.alias,
+				localPaths: paths,
+				remotePath: m.upload.fields[1].value,
+			},
+		}
+		return m, tea.Quit
+	case "esc":
+		m.upload.active = false
+		m.upload.err = ""
+		return m, nil
+	case "backspace":
+		f := &m.upload.fields[m.upload.cursor]
+		if len(f.value) > 0 {
+			f.value = f.value[:len(f.value)-1]
+		}
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		f := &m.upload.fields[m.upload.cursor]
+		f.value += txt
+		return m, nil
+	}
+}
+
+func (m *hostModel) renderUploadView(b *strings.Builder, maxLines int) {
+	title := fmt.Sprintf("  ── Upload to %s ──", m.upload.alias)
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	for i, f := range m.upload.fields {
+		if i >= maxLines-4 {
+			break
+		}
+		display := f.value
+		if display == "" && f.kind == "path" {
+			display = "(default)"
+		}
+		line := fmt.Sprintf("  %s: %s", f.label, display)
+		if i == m.upload.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line+"▌")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   " + line) + "\n")
+		}
+	}
+
+	if m.upload.err != "" {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠ " + m.upload.err)) + "\n")
+	}
+
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to upload  Esc cancel")) + "\n")
+
+	used := len(m.upload.fields) + 3
+	if m.upload.err != "" {
 		used += 2
 	}
 	for i := used; i < maxLines; i++ {
@@ -2863,9 +3084,22 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 	user := fields[3].value
 	pw := fields[4].value
 	group := ""
+	identityFile := ""
+	proxyJump := ""
+	remoteCommand := ""
 	for _, f := range fields {
-		if f.kind == "group" {
+		switch f.kind {
+		case "group":
 			group = f.value
+		case "text":
+			switch f.configKey {
+			case "IdentityFile":
+				identityFile = f.value
+			case "ProxyJump":
+				proxyJump = f.value
+			case "RemoteCommand":
+				remoteCommand = f.value
+			}
 		}
 	}
 
@@ -2881,7 +3115,7 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 	}
 
 	// Update main SSH config
-	updateHostConfig(origAlias, newAlias, hostName, port, user)
+	updateHostConfig(origAlias, newAlias, hostName, port, user, identityFile, proxyJump, remoteCommand)
 
 	// Update password in extended config
 	updatePasswordConfig(origAlias, pw)
@@ -2897,6 +3131,9 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 		m.hosts[hostIdx].Host = hostName
 		m.hosts[hostIdx].Port = port
 		m.hosts[hostIdx].User = user
+		m.hosts[hostIdx].IdentityFile = identityFile
+		m.hosts[hostIdx].ProxyJump = proxyJump
+		m.hosts[hostIdx].RemoteCommand = remoteCommand
 		m.hosts[hostIdx].GroupLabels = group
 	}
 	// If alias changed, also update filtered entries
@@ -2927,7 +3164,7 @@ func resolveHostPortUser(alias string) (string, string, string) {
 	return h, p, u
 }
 
-func updateHostConfig(origAlias, newAlias, hostName, port, user string) {
+func updateHostConfig(origAlias, newAlias, hostName, port, user, identityFile, proxyJump, remoteCommand string) {
 	path := userConfig.configPath
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -2966,7 +3203,10 @@ func updateHostConfig(origAlias, newAlias, hostName, port, user string) {
 		// Skip lines we are replacing
 		if strings.HasPrefix(lowLine, "hostname ") ||
 			strings.HasPrefix(lowLine, "port ") ||
-			strings.HasPrefix(lowLine, "user ") {
+			strings.HasPrefix(lowLine, "user ") ||
+			strings.HasPrefix(lowLine, "identityfile ") ||
+			strings.HasPrefix(lowLine, "proxyjump ") ||
+			strings.HasPrefix(lowLine, "remotecommand ") {
 			// Skip old line, we'll add new one at end of block
 			continue
 		}
@@ -2978,11 +3218,11 @@ func updateHostConfig(origAlias, newAlias, hostName, port, user string) {
 
 	// Now append new directives if they differ
 	if inBlock {
-		appendDirectives(origAlias, newAlias, hostName, port, user)
+		appendDirectives(origAlias, newAlias, hostName, port, user, identityFile, proxyJump, remoteCommand)
 	}
 }
 
-func appendDirectives(origAlias, newAlias, hostName, port, user string) {
+func appendDirectives(origAlias, newAlias, hostName, port, user, identityFile, proxyJump, remoteCommand string) {
 	path := userConfig.configPath
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -3054,7 +3294,10 @@ func appendDirectives(origAlias, newAlias, hostName, port, user string) {
 			lowTrim := strings.ToLower(trimmed)
 			if strings.HasPrefix(lowTrim, "hostname ") ||
 				strings.HasPrefix(lowTrim, "port ") ||
-				strings.HasPrefix(lowTrim, "user ") {
+				strings.HasPrefix(lowTrim, "user ") ||
+				strings.HasPrefix(lowTrim, "identityfile ") ||
+				strings.HasPrefix(lowTrim, "proxyjump ") ||
+				strings.HasPrefix(lowTrim, "remotecommand ") {
 				continue
 			}
 			cleaned = append(cleaned, result[i])
@@ -3087,6 +3330,15 @@ func appendDirectives(origAlias, newAlias, hostName, port, user string) {
 			}
 			if user != "" {
 				withDirectives = append(withDirectives, "    User "+user)
+			}
+			if identityFile != "" {
+				withDirectives = append(withDirectives, "    IdentityFile "+identityFile)
+			}
+			if proxyJump != "" {
+				withDirectives = append(withDirectives, "    ProxyJump "+proxyJump)
+			}
+			if remoteCommand != "" {
+				withDirectives = append(withDirectives, "    RemoteCommand "+remoteCommand)
 			}
 			withDirectives = append(withDirectives, result[newInsertIdx:]...)
 			result = withDirectives
@@ -3781,6 +4033,12 @@ func chooseAlias(keywords string) (string, bool, error) {
 			continue
 		}
 
+		if u := model.result.upload; u != nil {
+			execUpload(u)
+			keywords = ""
+			continue
+		}
+
 		alias := model.result.alias
 		if alias != "" {
 			fmt.Fprintf(os.Stderr, "\033[0;32m➜ %s\033[0m\r\n", alias)
@@ -3824,4 +4082,40 @@ func execDownload(d *downloadReq) {
 func waitForEnterOnDownload() {
 	fmt.Fprintf(os.Stderr, "Press Enter to continue...")
 	_, _ = fmt.Scanln()
+}
+
+func execUpload(u *uploadReq) {
+	alias := u.alias
+	localPaths := u.localPaths
+	remotePath := u.remotePath
+
+	args := []string{"-t", "--client"}
+	for _, p := range strings.Fields(localPaths) {
+		args = append(args, "--upload-file", p)
+	}
+	cmdStr := "trz -d"
+	if remotePath != "" {
+		cmdStr = fmt.Sprintf("trz -d %s", remotePath)
+	}
+	args = append(args, alias, cmdStr)
+
+	debug("exec upload: tssh %v", args)
+
+	exe, err := os.Executable()
+	if err != nil {
+		warning("get executable path failed: %v", err)
+		return
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Fprintf(os.Stderr, "\r\n\033[0;32mUploading to %s...\033[0m\r\n", alias)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31mUpload failed: %v\033[0m\r\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;32mUpload complete.\033[0m\r\n")
+	}
+	waitForEnterOnDownload()
 }

@@ -20,12 +20,14 @@ import (
 )
 
 type hostChoiceMsg struct {
-	alias      string
-	quit       bool
-	newHost    bool
-	editConfig bool
-	download   *downloadReq
-	upload     *uploadReq
+	alias        string
+	quit         bool
+	newHost      bool
+	editConfig   bool
+	download     *downloadReq
+	upload       *uploadReq
+	installTrzsz bool
+	installTsshd bool
 }
 
 type downloadReq struct {
@@ -348,6 +350,24 @@ func (m *hostModel) getContextItems() []contextItem {
 				{"Remote upload path", "", "path"},
 			}
 			return m, nil
+		}},
+		{"Install trzsz", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			if alias == "" {
+				return m, nil
+			}
+			m.done = true
+			m.result = hostChoiceMsg{alias: alias, installTrzsz: true}
+			return m, tea.Quit
+		}},
+		{"Install tsshd", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			if alias == "" {
+				return m, nil
+			}
+			m.done = true
+			m.result = hostChoiceMsg{alias: alias, installTsshd: true}
+			return m, tea.Quit
 		}},
 		{"Delete", func() (tea.Model, tea.Cmd) {
 			m.showContextMenu = false
@@ -2481,6 +2501,8 @@ func tunnelStopProcess(entry *tunnelEntry) tea.Cmd {
 func buildEditFields(alias string) []editField {
 	host, port, user := resolveHostPortUser(alias)
 	pw := getExConfig(alias, "Password")
+	pwCmd := getExConfig(alias, "PasswordCommand")
+	ppCmd := getExConfig(alias, "PassphraseCommand")
 	group := getGroupLabels(alias)
 	idFile := getConfig(alias, "IdentityFile")
 	proxyJump := getConfig(alias, "ProxyJump")
@@ -2491,6 +2513,8 @@ func buildEditFields(alias string) []editField {
 		{"Port", port, "Port", "text"},
 		{"User", user, "User", "text"},
 		{"Password", pw, "Password", "password"},
+		{"PasswordCommand", pwCmd, "PasswordCommand", "text"},
+		{"PassphraseCommand", ppCmd, "PassphraseCommand", "text"},
 		{"Group", group, "", "group"},
 		{"IdentityFile", idFile, "IdentityFile", "text"},
 		{"ProxyJump", proxyJump, "ProxyJump", "text"},
@@ -3083,6 +3107,8 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 	port := fields[2].value
 	user := fields[3].value
 	pw := fields[4].value
+	pwCmd := ""
+	ppCmd := ""
 	group := ""
 	identityFile := ""
 	proxyJump := ""
@@ -3093,6 +3119,10 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 			group = f.value
 		case "text":
 			switch f.configKey {
+			case "PasswordCommand":
+				pwCmd = f.value
+			case "PassphraseCommand":
+				ppCmd = f.value
 			case "IdentityFile":
 				identityFile = f.value
 			case "ProxyJump":
@@ -3119,6 +3149,16 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 
 	// Update password in extended config
 	updatePasswordConfig(origAlias, pw)
+
+	// Update password command in extended config
+	if pwCmd != getExConfig(origAlias, "PasswordCommand") {
+		updateExConfigKey(origAlias, "PasswordCommand", pwCmd)
+	}
+
+	// Update passphrase command in extended config
+	if ppCmd != getExConfig(origAlias, "PassphraseCommand") {
+		updateExConfigKey(origAlias, "PassphraseCommand", ppCmd)
+	}
 
 	// Update group in extended config
 	if group != getGroupLabels(origAlias) {
@@ -3437,6 +3477,46 @@ func updateGroupLabelsConfig(alias, group string) {
 	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
 
 	// Reset cache so next getGroupLabels reads fresh data
+	userConfig.exConfig = nil
+	userConfig.loadExConfig = sync.Once{}
+}
+
+func updateExConfigKey(alias, key, value string) {
+	path := userConfig.exConfigPath
+	if path == "" {
+		return
+	}
+	data, _ := os.ReadFile(path)
+	lines := strings.Split(string(data), "\n")
+
+	var result []string
+	found := false
+	lowerKey := strings.ToLower(key)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lowTrim, lowerKey+" ") {
+			parts := strings.SplitN(trimmed, " ", 3)
+			if len(parts) >= 2 && parts[1] == alias {
+				if value == "" {
+					continue // remove line
+				}
+				found = true
+				result = append(result, key+" "+alias+" = "+value)
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+
+	if !found && value != "" {
+		result = append(result, key+" "+alias+" = "+value)
+	}
+
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+
+	// Reset cache so next getExConfig reads fresh data
 	userConfig.exConfig = nil
 	userConfig.loadExConfig = sync.Once{}
 }
@@ -4039,6 +4119,18 @@ func chooseAlias(keywords string) (string, bool, error) {
 			continue
 		}
 
+		if model.result.installTrzsz {
+			execInstallTool(model.result.alias, "--install-trzsz")
+			keywords = ""
+			continue
+		}
+
+		if model.result.installTsshd {
+			execInstallTool(model.result.alias, "--install-tsshd")
+			keywords = ""
+			continue
+		}
+
 		alias := model.result.alias
 		if alias != "" {
 			fmt.Fprintf(os.Stderr, "\033[0;32m➜ %s\033[0m\r\n", alias)
@@ -4082,6 +4174,29 @@ func execDownload(d *downloadReq) {
 func waitForEnterOnDownload() {
 	fmt.Fprintf(os.Stderr, "Press Enter to continue...")
 	_, _ = fmt.Scanln()
+}
+
+func execInstallTool(alias, flag string) {
+	args := []string{flag, alias}
+	debug("exec install: tssh %v", args)
+
+	exe, err := os.Executable()
+	if err != nil {
+		warning("get executable path failed: %v", err)
+		return
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Fprintf(os.Stderr, "\r\n\033[0;32mInstalling on %s...\033[0m\r\n", alias)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31mInstall failed: %v\033[0m\r\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;32mInstall complete.\033[0m\r\n")
+	}
+	waitForEnterOnDownload()
 }
 
 func execUpload(u *uploadReq) {

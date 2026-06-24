@@ -11,12 +11,15 @@
 - [Quit] — salir
 
 ### Context menu (← sobre host)
-- **Edit** — formulario inline: Alias, HostName, Port, User, Password
-- **Tunnels** — gestor de túneles SSH (manual/auto, scan, Docker, persistencia)
+- **Edit** — formulario inline: Alias, HostName, Port, User, Password, PasswordCommand, PassphraseCommand, IdentityFile, ProxyJump, RemoteCommand, Group
+- **Tunnels** — gestor de túneles SSH (manual/auto, scan, Docker, persistencia) con soporte L/R/D
 - **Download** — formulario: paths remotos + ruta local, ejecuta `tssh -t --client --download-path ...`
+- **Upload** — formulario: paths locales + ruta remota, ejecuta `tssh --upload-file ...`
+- **Install trzsz** — instala trzsz en el host remoto
+- **Install tsshd** — instala tsshd en el host remoto
 - **Delete** — confirmación y eliminación del host
 
-### Config form (8 opciones)
+### Config form (11 opciones)
 | Opción | Descripción |
 |---|---|
 | `ServerAliveInterval` | Keepalive en segundos |
@@ -27,6 +30,9 @@
 | `PromptDefaultMode` | Modo inicial (search/normal) |
 | `PromptPageSize` | Registros por página |
 | `Language` | Idioma (english/chinese) |
+| `ConfigPath` | Ruta config SSH |
+| `ExConfigPath` | Ruta config extendida |
+| `UseOpenSSHConfig` | Usar `ssh -G` para effective config |
 
 ### Otras features TUI
 - Búsqueda/filtro con keywords
@@ -38,28 +44,29 @@
 - Favoritos / last login tracking
 - Show/hide system hosts
 - Ayuda con tecla `?`
-- Túneles: creación manual, auto-scan (ss/netstat), Docker, persistencia JSON
+- Túneles: creación manual, auto-scan (ss/netstat), Docker, persistencia JSON, L/R/D
+- Upload file desde context menu
+- Install trzsz/tsshd desde context menu
+- Password managers (PasswordCommand, PassphraseCommand) en Edit form
 - ScrollOffset + availableHeight seguro
 
 ---
 
 ## ❌ Pendiente de implementar en el TUI
 
-### 1. Ampliar Edit form — campos por host
+### 1. Más campos en Edit form
 
-Actualmente solo edita: Alias, HostName, Port, User, Password.
+Actualmente edita: Alias, HostName, Port, User, Password, IdentityFile, ProxyJump, RemoteCommand, Group.
+Faltan campos por host:
 
 | Campo | Prioridad |
 |---|---|
-| `IdentityFile` | Alta |
-| `ProxyJump` | Alta |
-| `RemoteCommand` | Alta |
-| `GroupLabels` | Alta |
 | `UdpMode` (yes/QUIC/KCP/no) | Media |
 | `EnableTrzsz` (yes/no) | Media |
 | `EnableZmodem` (yes/no) | Media |
 | `EnableDragFile` (yes/no) | Media |
 | `ForwardAgent` (yes/no) | Media |
+| `TotpSecret1..N` / `OtpCommand1..N` | Media |
 | `ForwardX11` (yes/no) | Baja |
 | `ConnectTimeout` | Baja |
 | `ServerAliveCountMax` | Baja |
@@ -70,56 +77,35 @@ Actualmente solo edita: Alias, HostName, Port, User, Password.
 | `EnableOSC52` | Baja |
 | `Compression` | Baja |
 
-### 2. Ampliar Config form — opciones faltantes de ~/.tssh.conf
+### 2. Más opciones en Config form
 
-Actualmente cubre 8 de 17 opciones.
+Actualmente cubre 11 de ~17 opciones.
 
 | Opción | Prioridad |
 |---|---|
-| `ConfigPath` | Alta |
-| `ExConfigPath` | Alta |
-| `UseOpenSSHConfig` | Alta |
 | `DefaultUploadPath` | Media |
 | `ProgressColorPair` | Media |
 | `PromptDetailItems` | Media |
 | `PromptCursorIcon` | Baja |
 | `PromptSelectedIcon` | Baja |
 
-### 3. Upload file — context menu
-
-Similar a **Download** pero para subir archivos al servidor con `--upload-file`.
-- Formulario: paths locales + ruta remota de destino
-- Ejecuta `tssh --upload-file <local> <alias> '<trz -d /ruta/>'`
-
-### 4. Port forwarding avanzado (L/R/D)
-
-Actualmente solo existen túneles TCP simples con `-NL`. Falta:
-- `-L` local forwarding con bind address
-- `-R` remote forwarding
-- `-D` dynamic forwarding (SOCKS5)
-- UDP forwarding (`UdpLocalForward` / `UdpRemoteForward`)
-
-### 5. Password managers externos
+### 3. Password managers externos
 
 Formulario para configurar `PasswordCommand`, `PassphraseCommand`, etc. con
 soporte de tokens `%n`, `%h`, `%r`, `%p`.
 
-### 6. TOTP / OTP editor
-
-En Edit form, campos para `TotpSecret1..N` y `OtpCommand1..N`.
-
-### 7. Install tools desde el TUI
+### 4. Install tools desde el TUI
 
 Botón o acción que ejecute:
 - `--install-trzsz` en el host seleccionado
 - `--install-tsshd` en el host seleccionado
 
-### 8. UDP mode global / por host
+### 5. UDP mode global / por host
 
 - Config global: UdpMode, TsshdPath, TsshdPort, UdpAliveTimeout, etc.
 - Por host: toggle UDP/KCP/QUIC desde Edit form
 
-### 9. Expect automation editor
+### 6. Expect automation editor
 
 Formulario para configurar:
 - `ExpectCount`, `ExpectTimeout`
@@ -127,14 +113,14 @@ Formulario para configurar:
 - `ExpectSendTotp1..N`, `ExpectSendOtp1..N`
 - `CtrlExpect*`
 
-### 10. Reconnect / Debug / TraceLog desde TUI
+### 7. Reconnect / Debug / TraceLog desde TUI
 
 Opciones globales en Config form:
 - `--reconnect` al iniciar sesión
 - `--debug` mode
 - `--tracelog` mode
 
-### 11. Opciones de ~/.ssh/password (exConfig)
+### 8. Opciones de ~/.ssh/password (exConfig)
 
 Actualmente el TUI solo escribe `encPassword` al crear/editar hosts.
 Falta editor para:
@@ -175,11 +161,11 @@ Falta editor para:
 
 ## Prioridades
 
-1. **Alta** — Ampliar Edit form (IdentityFile, ProxyJump, RemoteCommand, GroupLabels)
-2. **Alta** — Ampliar Config form (ConfigPath, ExConfigPath, UseOpenSSHConfig)
-3. **Alta** — Upload file en context menu
-4. **Media** — Port forwarding avanzado (L/R/D)
-5. **Media** — Password managers, TOTP/OTP editors
-6. **Media** — Install tools desde TUI
+1. ✅ **Alta** — Ampliar Edit form (IdentityFile, ProxyJump, RemoteCommand, GroupLabels)
+2. ✅ **Alta** — Ampliar Config form (ConfigPath, ExConfigPath, UseOpenSSHConfig)
+3. ✅ **Alta** — Upload file en context menu
+4. ✅ **Media** — Port forwarding avanzado (L/R/D)
+5. ✅ **Media** — Password managers externos
+6. ✅ **Media** — Install tools desde TUI
 7. **Baja** — UDP por host, Expect editor, Debug/Reconnect toggles
 8. **Baja** — exConfig editor completo

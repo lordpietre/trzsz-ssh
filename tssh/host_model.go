@@ -877,6 +877,27 @@ func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea
 	return m, nil
 }
 
+func simplifyDockerPorts(portsStr string) string {
+	var ports []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(portsStr, ",") {
+		part = strings.TrimSpace(part)
+		idx := strings.Index(part, "->")
+		if idx < 0 {
+			continue
+		}
+		containerPort := strings.TrimSpace(part[idx+2:])
+		if !seen[containerPort] {
+			seen[containerPort] = true
+			ports = append(ports, containerPort)
+		}
+	}
+	if len(ports) > 0 {
+		return strings.Join(ports, ", ")
+	}
+	return "(no host ports)"
+}
+
 func parseDockerHostPorts(portsStr string) []int {
 	var hostPorts []int
 	for _, part := range strings.Split(portsStr, ",") {
@@ -1912,7 +1933,8 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 		rendered++
 		for i := 0; i < totalDocker && i < showDocker; i++ {
 			c := m.tunnel.dockerContainers[i]
-			line := fmt.Sprintf("  · %s   %s", c.Name, c.Ports)
+			line := fmt.Sprintf("  · %s   %s", c.Name, simplifyDockerPorts(c.Ports))
+			line = clipString(line, m.width-4)
 			cursorIdx := dockerOffset + i
 			if cursorIdx == m.tunnel.scanCursor {
 				b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line)) + "\n")

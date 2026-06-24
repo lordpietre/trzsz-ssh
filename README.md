@@ -55,6 +55,17 @@ trzsz-ssh ( tssh ) offers additional useful features:
 |        [Reconnect Mode](README.en.md#reconnect-mode)        |      [重连模式](README.cn.md#%E9%87%8D%E8%BF%9E%E6%A8%A1%E5%BC%8F)       |
 |         [UDP Mode ( mosh )](README.en.md#udp-mode)          |         [UDP 模式 ( mosh )](README.cn.md#udp-%E6%A8%A1%E5%BC%8F)         |
 |   [UDP Port Forwarding](README.en.md#udp-port-forwarding)   |  [UDP 端口转发](README.cn.md#udp-%E7%AB%AF%E5%8F%A3%E8%BD%AC%E5%8F%91)   |
+|   [Tunnel Management](#tunnel-management)   |       [隧道管理](#tunnel-management)       |
+
+### Tunnel Management
+
+tssh includes a built-in TUI for managing SSH port forwarding tunnels directly from the host list.
+
+- **Context menu**: Press `←`/`→` on a host to open the context menu with **Edit**, **Tunnels**, **Delete**.
+- **Manual tunnel**: Enter remote and local ports manually; tssh spawns `ssh -NL` in the background.
+- **Automatic tunnel**: tssh connects to the remote host (reusing stored passwords/keys), scans for open ports via `ss -tlnp`/`netstat -tlnp`, presents the list, and lets you select a port to tunnel.
+- **Persistence**: Tunnels are saved to `~/.tssh_tunnels` and restored on subsequent sessions.
+- **Stop tunnels**: Press `d` in the tunnel menu to enter delete mode, select a tunnel with `↑`/`↓`, and press `Enter` to stop it.
 
 ### Installation
 

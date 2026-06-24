@@ -89,6 +89,7 @@ type tunnelState struct {
 	tunnelDelMode    bool
 	tunnelConfigPath string
 	dockerContainers []dockerContainer
+	visibleItems     int // items actually visible (clips cursor to this range)
 }
 
 type editField struct {
@@ -833,18 +834,18 @@ func (m *hostModel) handleTunnelManualForm(msg tea.KeyPressMsg) (tea.Model, tea.
 
 func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
-	totalItems := len(m.tunnel.scanPorts) + len(m.tunnel.dockerContainers)
+	visible := m.tunnel.visibleItems
 	switch s {
 	case "up", "k":
 		if m.tunnel.scanCursor > 0 {
 			m.tunnel.scanCursor--
 		}
 	case "down", "j":
-		if m.tunnel.scanCursor < totalItems-1 {
+		if m.tunnel.scanCursor < visible-1 {
 			m.tunnel.scanCursor++
 		}
 	case "enter":
-		if totalItems == 0 {
+		if visible == 0 {
 			break
 		}
 		if m.tunnel.scanCursor < len(m.tunnel.scanPorts) {
@@ -856,7 +857,8 @@ func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea
 				if len(ports) > 0 {
 					m.tunnel.askLocalRemote = ports[0]
 				} else {
-					break
+					m.tunnel.scanErr = fmt.Sprintf("Container %q has no exposed host ports", m.tunnel.dockerContainers[dockerIdx].Name)
+					return m, nil
 				}
 			} else {
 				break
@@ -1841,12 +1843,11 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 	showDocker := totalDocker
 	available := maxLines - 3 // leave room for help line
 	if totalItems > available && totalDocker > 0 {
-		// Try to show at least some of both
 		portLines := available * totalPorts / totalItems
 		if portLines < 1 {
 			portLines = 1
 		}
-		dockerLines := available - portLines - 1 // 1 for docker header
+		dockerLines := available - portLines - 2 // blank line + docker header
 		if dockerLines < 1 {
 			showDocker = 0
 			showPorts = available
@@ -1858,6 +1859,19 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 		showPorts = available
 		showDocker = 0
 	}
+
+	// Clamp cursor to visible items range
+	visibleItems := showPorts + showDocker
+	if visibleItems < 1 && totalItems > 0 {
+		visibleItems = 1
+	}
+	if m.tunnel.scanCursor >= visibleItems {
+		m.tunnel.scanCursor = visibleItems - 1
+	}
+	if m.tunnel.scanCursor < 0 {
+		m.tunnel.scanCursor = 0
+	}
+	m.tunnel.visibleItems = visibleItems
 
 	// Render ports
 	rendered := 0

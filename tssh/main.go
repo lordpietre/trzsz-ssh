@@ -241,6 +241,27 @@ func addOnCloseFunc(f func()) {
 
 var isTerminal bool = isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 
+func isDockerHost(alias string) bool {
+	for _, h := range getAllHosts() {
+		if h.Alias == alias && h.IsDocker {
+			return true
+		}
+	}
+	return false
+}
+
+func execDockerExec(container, shell string) {
+	cmd := exec.Command("docker", "exec", "-it", container, shell)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		debug("docker exec [%s] %s failed: %v", container, shell, err)
+	} else {
+		debug("docker exec [%s] %s exited", container, shell)
+	}
+}
+
 // TrzMain is the main function of tssh program.
 func TsshMain(argv []string) int {
 	// parse ssh args
@@ -353,6 +374,12 @@ func TsshMain(argv []string) int {
 	// custom DNS server
 	if args.Dns != "" {
 		setDNS(args.Dns)
+	}
+
+	// handle docker containers
+	if isDockerHost(dest) {
+		execDockerExec(dest, "bash")
+		return 0
 	}
 
 	// start ssh program

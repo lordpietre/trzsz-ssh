@@ -70,6 +70,7 @@ type sshHost struct {
 	Selected      bool `json:"-"`
 	LastLogin     string
 	System        bool
+	IsDocker      bool
 }
 
 type tsshConfig struct {
@@ -90,6 +91,7 @@ type tsshConfig struct {
 	promptCursorIcon      string
 	promptSelectedIcon         string
 	defaultServerAliveInterval uint32
+	dockerEnabled             bool
 	setTerminalTitle           string
 	loadConfig                 sync.Once
 	loadExConfig               sync.Once
@@ -212,6 +214,11 @@ func parseTsshConfig() {
 			} else {
 				userConfig.defaultServerAliveInterval = uint32(v)
 			}
+		case name == "enabledockercontainers" && !userConfig.dockerEnabled:
+			switch strings.ToLower(value) {
+			case "1", "true", "yes", "on":
+				userConfig.dockerEnabled = true
+			}
 		}
 	}
 
@@ -279,6 +286,9 @@ func showTsshConfig() {
 	if userConfig.defaultServerAliveInterval != 0 {
 		debug("DefaultServerAliveInterval = %d", userConfig.defaultServerAliveInterval)
 	}
+	if userConfig.dockerEnabled {
+		debug("EnableDockerContainers = true")
+	}
 }
 
 func printConfigHelp() {
@@ -332,6 +342,9 @@ func printConfigHelp() {
   PromptSelectedIcon = 🍺
     Custom selected icon in TUI.
 
+  EnableDockerContainers = yes
+    List running Docker containers in the TUI for quick docker exec access.
+
   Language = english
     Interface language: english | chinese.
 
@@ -348,7 +361,9 @@ func printConfigHelp() {
 }
 
 func initUserConfig(configFile string) (err error) {
-	userConfig = &tsshConfig{}
+	userConfig = &tsshConfig{
+		dockerEnabled: true,
+	}
 	userHomeDir, err = os.UserHomeDir()
 	if err != nil {
 		debug("user home dir failed: %v", err)
@@ -650,6 +665,36 @@ func getAllExConfig(alias, key string) []string {
 	return values
 }
 
+func getDockerContainers() []*sshHost {
+	if !userConfig.dockerEnabled {
+		return nil
+	}
+	cmd := exec.Command("docker", "ps", "--format", "{{.Names}}\t{{.ID}}")
+	out, err := cmd.Output()
+	if err != nil {
+		debug("docker ps failed: %v", err)
+		return nil
+	}
+	var containers []*sshHost
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		name := parts[0]
+		id := ""
+		if len(parts) > 1 {
+			id = parts[1][:12]
+		}
+		containers = append(containers, &sshHost{
+			Alias:    name,
+			Host:     id,
+			IsDocker: true,
+		})
+	}
+	return containers
+}
+
 func getAllHosts() []*sshHost {
 	userConfig.loadHosts.Do(func() {
 		userConfig.doLoadConfig()
@@ -659,6 +704,9 @@ func getAllHosts() []*sshHost {
 		}
 		if userConfig.sysConfig != nil {
 			userConfig.allHosts = append(userConfig.allHosts, recursiveGetHosts(userConfig.sysConfig.Hosts, seen, true)...)
+		}
+		if dockerHosts := getDockerContainers(); len(dockerHosts) > 0 {
+			userConfig.allHosts = append(userConfig.allHosts, dockerHosts...)
 		}
 		addAfterLoginFunc(func() { userConfig.allHosts = nil; userConfig.wildcardPatterns = nil })
 	})

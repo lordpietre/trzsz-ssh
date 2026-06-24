@@ -1453,14 +1453,22 @@ func (m *hostModel) renderHost(b *strings.Builder, h *sshHost, isActive bool) {
 
 	// Build alias column
 	alias := h.Alias
-	if ansi.StringWidth(alias) > aliasW-1 {
-		alias = ansi.Truncate(alias, aliasW-1, "")
+	dockerIcon := ""
+	if h.IsDocker {
+		dockerIcon = "🐳 "
+	}
+	aliasDisplay := dockerIcon + alias
+	if ansi.StringWidth(aliasDisplay) > aliasW-1 {
+		aliasDisplay = ansi.Truncate(aliasDisplay, aliasW-1, "")
 	}
 
 	// Build IP column
 	ip := h.Host
 	if ip == "" {
 		ip = h.Alias
+	}
+	if h.IsDocker && ip == h.Alias {
+		ip = "docker"
 	}
 	if ansi.StringWidth(ip) > ipW-1 {
 		ip = ansi.Truncate(ip, ipW-1, "")
@@ -1482,13 +1490,13 @@ func (m *hostModel) renderHost(b *strings.Builder, h *sshHost, isActive bool) {
 	}
 
 	// Pad each column to its width
-	aliasPad := repeatSafe(aliasW - ansi.StringWidth(alias))
+	aliasPad := repeatSafe(aliasW - ansi.StringWidth(aliasDisplay))
 	ipPad := repeatSafe(ipW - ansi.StringWidth(ip))
 
 	line := fmt.Sprintf("%s%s%s%s%s%s",
 		pad,
 		selStyle.Render(selIcon),
-		style.Render(" "+alias+aliasPad+" "),
+		style.Render(" "+aliasDisplay+aliasPad+" "),
 		m.helpStyle.Render(ip+ipPad),
 		m.helpStyle.Render(" "+login),
 		groups)
@@ -1506,6 +1514,9 @@ func (m *hostModel) countDetailLines() int {
 	}
 	h := m.filtered[m.cursor]
 	count := 0
+	if h.IsDocker {
+		count++ // Type: Docker
+	}
 	for _, item := range getPromptDetailItems() {
 		var value string
 		switch strings.ToLower(item) {
@@ -1547,6 +1558,12 @@ func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost, maxLines int) 
 	}
 
 	written := 0
+	if h.IsDocker {
+		line := "  Type:  Docker Container"
+		line = clipString(line, width)
+		b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
+		written++
+	}
 	for _, item := range items {
 		if maxLines > 0 && written >= maxLines {
 			break
@@ -2566,6 +2583,10 @@ func buildConfigFields() []configField {
 	if userConfig.useOpenSSHConfig {
 		useOpenSSH = "yes"
 	}
+	dockerEnabled := "yes"
+	if !userConfig.dockerEnabled {
+		dockerEnabled = "no"
+	}
 	return []configField{
 		{"defaultserveraliveinterval", "ServerAliveInterval (0=off)", alive, "number"},
 		{"setterminaltitle", "Set terminal title", title, "bool"},
@@ -2578,6 +2599,7 @@ func buildConfigFields() []configField {
 		{"configpath", "Config path", configPath, "text"},
 		{"exconfigpath", "ExConfig path", exConfigPath, "text"},
 		{"useopensshconfig", "Use OpenSSH config (yes/no)", useOpenSSH, "bool"},
+		{"enabledockercontainers", "List Docker containers", dockerEnabled, "bool"},
 	}
 }
 
@@ -2686,6 +2708,8 @@ func (m *hostModel) writeTsshConfig() error {
 				lines = append(lines, fmt.Sprintf("ExConfigPath = %s", val))
 			case "useopensshconfig":
 				lines = append(lines, fmt.Sprintf("UseOpenSSHConfig = %s", val))
+			case "enabledockercontainers":
+				lines = append(lines, fmt.Sprintf("EnableDockerContainers = %s", val))
 			}
 		}
 	}
@@ -4147,6 +4171,19 @@ func chooseAlias(keywords string) (string, bool, error) {
 
 		alias := model.result.alias
 		if alias != "" {
+			// Check if it's a Docker container — handle inline and loop back
+			for _, h := range hosts {
+				if h.Alias == alias && h.IsDocker {
+					fmt.Fprintf(os.Stderr, "\033[0;32m➜ %s\033[0m\r\n", alias)
+					shell := promptList("Select shell", "Choose the shell to use in the container", []string{"bash", "sh"})
+					execDockerExec(alias, shell)
+					// Invalidate host cache to refresh container list
+					userConfig.allHosts = nil
+					userConfig.loadHosts = sync.Once{}
+					keywords = ""
+					continue
+				}
+			}
 			fmt.Fprintf(os.Stderr, "\033[0;32m➜ %s\033[0m\r\n", alias)
 		}
 		return alias, false, nil

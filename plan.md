@@ -1,233 +1,185 @@
-# Plan: Migración completa a ncurses + TSSH 2.0
+# Plan: TUI ncurses completo
 
-Basado en el documento de Arquitectura Técnica TSSH 2.0 y los issues
-actuales (panic en renderActions, navegación de acciones, new host fuera del TUI).
+## ✅ Ya implementado en el TUI ncurses
 
----
+### Action bar (botones)
+- [New] — formulario nuevo host inline
+- [Search] — filtro de hosts
+- [Select] — multi-select para batch login
+- [Enter] / [Win] [Tab] [Pane] — login individual o batch
+- [Config] — editor de `~/.tssh.conf`
+- [Quit] — salir
 
-## Fase 0 — Correcciones inmediatas ✓
+### Context menu (← sobre host)
+- **Edit** — formulario inline: Alias, HostName, Port, User, Password
+- **Tunnels** — gestor de túneles SSH (manual/auto, scan, Docker, persistencia)
+- **Download** — formulario: paths remotos + ruta local, ejecuta `tssh -t --client --download-path ...`
+- **Delete** — confirmación y eliminación del host
 
-| # | Tarea | Archivo | Estado |
-|---|-------|---------|--------|
-| 0.1 | Panic `strings: negative Repeat count` en `renderActions` | `host_model.go` | ✓ |
-| 0.2 | Navegación de acciones con ← → + Enter | `host_model.go` | ✓ |
-| 0.3 | Ayuda (`?`) implementada (showHelp) | `host_model.go` | ✓ |
-| 0.4 | ← → en listModel y menuModel | `tools.go`, `console.go` | ✓ |
-| 0.5 | ↓ al final de lista → barra de acciones | `host_model.go` | ✓ |
-| 0.6 | ↑ desde barra de acciones → último host | `host_model.go` | ✓ |
+### Config form (8 opciones)
+| Opción | Descripción |
+|---|---|
+| `ServerAliveInterval` | Keepalive en segundos |
+| `SetTerminalTitle` | Auto-set titulo terminal |
+| `DragFileUploadCommand` | Comando drag & drop |
+| `DefaultDownloadPath` | Ruta descarga por defecto |
+| `PromptThemeLayout` | Tema (tiny/simple/table) |
+| `PromptDefaultMode` | Modo inicial (search/normal) |
+| `PromptPageSize` | Registros por página |
+| `Language` | Idioma (english/chinese) |
 
----
-
-## Fase 1 — Estabilizar TUI ncurses (fondo blanco siempre visible)
-
-### 1.1 Fondo blanco en host_model ✓
-- `bgStyle` (fondo blanco ANSI 15) aplicado en todas las líneas.
-- Título con fondo azul, bordes con caracteres de caja.
-- `repeatSafe()` helper para evitar padding negativo.
-- Guard de tamaño mínimo de terminal (80x24).
-
-### 1.2 Consola ncurses (console.go) ✓
-- Migrado de tema oscuro (#1b1b32) a ncurses blanco.
-- Fondo blanco ANSI 15, texto negro, azul para items activos.
-- Cursor sólido `▐█` en item activo.
-- Bordes con caracteres de caja.
-
-### 1.3 Padding seguro (repeatSafe) ✓
-- Helper `repeatSafe(n int)` en `host_model.go`.
-- Reemplazados todos los `strings.Repeat(" ", N)` sin guard.
-
-### 1.4 Medición ANSI correcta ✓
-- `ansi.StringWidth()` usado en `renderActions` y console View.
-- `lipgloss.Width()` usado en `bgLine` y `renderHost`.
-
-### 1.5 Attach TUI ncurses (attach.go) ✓
-- Migrado de tema púrpura oscuro a ncurses blanco.
-- Panel dual (sesiones + preview) con bordes de caja.
-- Cursor sólido `▐█` en item activo.
-
-### 1.6 Tools UI ncurses (tools.go) ⬜
-- Migrar `listModel`, `textInputModel`, `passwordModel` a ncurses blanco.
-
-### 1.7 Scroll suave en lista de hosts ⬜
-- Verificar `scrollOffset` y `availableHeight`.
+### Otras features TUI
+- Búsqueda/filtro con keywords
+- Group labels filtering
+- Multi-select + batch login (tmux/iTerm2/WT)
+- Temas con colores personalizables
+- Paginación (`PromptPageSize`)
+- Panel de detalle del host
+- Favoritos / last login tracking
+- Show/hide system hosts
+- Ayuda con tecla `?`
+- Túneles: creación manual, auto-scan (ss/netstat), Docker, persistencia JSON
+- ScrollOffset + availableHeight seguro
 
 ---
 
-## Fase 2 — New host dentro del TUI ncurses
+## ❌ Pendiente de implementar en el TUI
 
-### 2.1 Formulario de nuevo host como modelo Bubble Tea ⬜
-- Reemplazar las llamadas a `promptTextInput`, `promptPassword`,
-  `promptList` (que lanzan programas Bubble Tea separados) por un modelo
-  interno que renderice el formulario dentro del mismo TUI ncurses.
-- **Archivo**: `host_new.go` (nuevo)
+### 1. Ampliar Edit form — campos por host
 
-### 2.2 Integración con el flujo actual ⬜
-- En lugar de salir del TUI, el formulario se ejecuta como sub-modelo.
-- **Archivos**: `host_model.go`, `tools_new_host.go`
+Actualmente solo edita: Alias, HostName, Port, User, Password.
 
----
+| Campo | Prioridad |
+|---|---|
+| `IdentityFile` | Alta |
+| `ProxyJump` | Alta |
+| `RemoteCommand` | Alta |
+| `GroupLabels` | Alta |
+| `UdpMode` (yes/QUIC/KCP/no) | Media |
+| `EnableTrzsz` (yes/no) | Media |
+| `EnableZmodem` (yes/no) | Media |
+| `EnableDragFile` (yes/no) | Media |
+| `ForwardAgent` (yes/no) | Media |
+| `ForwardX11` (yes/no) | Baja |
+| `ConnectTimeout` | Baja |
+| `ServerAliveCountMax` | Baja |
+| `DnsSrvName` | Baja |
+| `HideHost` | Baja |
+| `ConsoleEscapeTime` | Baja |
+| `EnableWaypipe` | Baja |
+| `EnableOSC52` | Baja |
+| `Compression` | Baja |
 
-## Fase 3 — Menú contextual y Navegación ncurses ✓
+### 2. Ampliar Config form — opciones faltantes de ~/.tssh.conf
 
-### 3.1 Menú contextual (←/→ sobre host) ✓
-- Al pulsar ← o → sobre un host se abre menú contextual flotante.
-- Opciones: **Edit**, **Tunnels**, **Delete**.
-- ↑↓ para navegar, Enter para ejecutar, Esc/← para cerrar.
-- **Archivo**: `host_model.go`
+Actualmente cubre 8 de 17 opciones.
 
-### 3.2 Edit — Abrir config en editor ✓
-- Sale del TUI (alt screen), abre `~/.ssh/config` con `$EDITOR`.
-- Al cerrar el editor, se reinicia el TUI automáticamente.
-- **Archivo**: `host_model.go`
+| Opción | Prioridad |
+|---|---|
+| `ConfigPath` | Alta |
+| `ExConfigPath` | Alta |
+| `UseOpenSSHConfig` | Alta |
+| `DefaultUploadPath` | Media |
+| `ProgressColorPair` | Media |
+| `PromptDetailItems` | Media |
+| `PromptCursorIcon` | Baja |
+| `PromptSelectedIcon` | Baja |
 
-### 3.3 Delete — Eliminar host del config ✓
-- Busca el bloque `Host <alias>` en `~/.ssh/config` y lo elimina.
-- Refresca la lista de hosts automáticamente.
-- **Archivo**: `host_model.go`
+### 3. Upload file — context menu
 
-### 3.4 Tunnels — Gestión de túneles SSH ✓
-- Al seleccionar "Tunnels" sobre un host, se entra al gestor de túneles.
-- **Archivo**: `host_model.go`
+Similar a **Download** pero para subir archivos al servidor con `--upload-file`.
+- Formulario: paths locales + ruta remota de destino
+- Ejecuta `tssh --upload-file <local> <alias> '<trz -d /ruta/>'`
 
----
+### 4. Port forwarding avanzado (L/R/D)
 
-## Fase 4 — Tunnel Manager (completo) ✓
+Actualmente solo existen túneles TCP simples con `-NL`. Falta:
+- `-L` local forwarding con bind address
+- `-R` remote forwarding
+- `-D` dynamic forwarding (SOCKS5)
+- UDP forwarding (`UdpLocalForward` / `UdpRemoteForward`)
 
-### 4.1 Menú de túneles ✓
-- Muestra túneles guardados para el host (cargados de `~/.tssh_tunnels`).
-- Dos modos de creación: Manual y Automático.
-- Navegación ↑↓ entre opciones, Enter para seleccionar.
-- Tecla `d` para entrar en modo borrado de túneles.
-- **Archivo**: `host_model.go`
+### 5. Password managers externos
 
-### 4.2 Manual — Formulario de puertos ✓
-- Campos: Puerto Remoto, Puerto Local.
-- Solo dígitos, Tab para cambiar campo, Enter para crear.
-- Crea proceso `ssh -NL <local>:localhost:<remote>` en background.
-- **Archivo**: `host_model.go`
+Formulario para configurar `PasswordCommand`, `PassphraseCommand`, etc. con
+soporte de tokens `%n`, `%h`, `%r`, `%p`.
 
-### 4.3 Automático — Escaneo de puertos ✓
-- Conecta al host vía `SshLogin()` (reusa autenticación guardada).
-- Ejecuta `ss -tlnp` / `netstat -tlnp` en el remoto.
-- Parsea puertos abiertos y los muestra en lista.
-- Seleccionas uno → pide puerto local → crea túnel.
-- **Archivo**: `host_model.go`
+### 6. TOTP / OTP editor
 
-### 4.4 Persistencia ✓
-- Túneles guardados en `~/.tssh_tunnels` (JSON).
-- Se recargan al reabrir el menú de túneles.
-- Al borrar, se mata el proceso y se elimina del archivo.
-- **Archivo**: `host_model.go`
+En Edit form, campos para `TotpSecret1..N` y `OtpCommand1..N`.
 
-### 4.5 Borrado de túneles ✓
-- Tecla `d` en el menú → modo borrado.
-- ↑↓ selecciona túnel, Enter confirma, Esc cancela.
-- Mata proceso SSH subyacente y elimina entrada.
-- **Archivo**: `host_model.go`
+### 7. Install tools desde el TUI
 
----
+Botón o acción que ejecute:
+- `--install-trzsz` en el host seleccionado
+- `--install-tsshd` en el host seleccionado
 
-## Fase 5 — Sesión Manager + Drivers modulares (TSSH 2.0)
+### 8. UDP mode global / por host
 
-### 5.1 Session Manager (núcleo) ⬜
-- Nuevo componente central que orquesta todas las operaciones.
-- **Archivos**: `internal/session/` (nuevo paquete)
+- Config global: UdpMode, TsshdPath, TsshdPort, UdpAliveTimeout, etc.
+- Por host: toggle UDP/KCP/QUIC desde Edit form
 
-### 5.2 Driver interface ⬜
-- Interfaz común para todos los protocolos (SSH, Serial, TCP Raw).
-- **Archivos**: `internal/driver/` (nuevo)
+### 9. Expect automation editor
 
-### 5.3 SSH Driver refactorizado ⬜
-- Extraer lógica SSH actual en un `sshDriver`.
-- **Archivos**: `internal/driver/ssh/` (nuevo)
+Formulario para configurar:
+- `ExpectCount`, `ExpectTimeout`
+- `ExpectPattern1..N`, `ExpectSendPass1..N`, `ExpectSendText1..N`
+- `ExpectSendTotp1..N`, `ExpectSendOtp1..N`
+- `CtrlExpect*`
 
-### 5.4 Serial Driver ⬜
-- Soporte para `/dev/ttyUSB*`, `/dev/ttyS*`.
-- **Archivos**: `internal/driver/serial/` (nuevo)
+### 10. Reconnect / Debug / TraceLog desde TUI
 
-### 5.5 TCP Raw Driver ⬜
-- Conexiones TCP simples sin SSH.
-- **Archivos**: `internal/driver/tcp/` (nuevo)
+Opciones globales en Config form:
+- `--reconnect` al iniciar sesión
+- `--debug` mode
+- `--tracelog` mode
 
----
+### 11. Opciones de ~/.ssh/password (exConfig)
 
-## Fase 6 — Discovery, Túneles y Servicios (mejora continua)
-
-### 6.1 Discovery de servicios ⬜
-- Escaneo vía `ss -tulpen` categorizando servicios.
-- **Archivos**: `internal/discovery/` (nuevo)
-
-### 6.2 Port Manager ⬜
-- Asignación automática de puertos locales.
-- **Archivos**: `internal/port/` (nuevo)
-
-### 6.3 Service Manager ⬜
-- Inventario persistente de servicios detectados.
-- **Archivos**: `internal/service/` (nuevo)
-
-### 6.4 Connection Manager ⬜
-- Estado de todas las conexiones activas.
-- **Archivos**: `internal/connection/` (nuevo)
-
-### 6.5 Config Manager ⬜
-- Persistencia en YAML de servidores, túneles, perfiles.
-- **Archivos**: `internal/config/` (nuevo)
-
-### 6.6 Log Manager ⬜
-- Registro centralizado de eventos.
-- **Archivos**: `internal/log/` (nuevo)
+Actualmente el TUI solo escribe `encPassword` al crear/editar hosts.
+Falta editor para:
+- `encPassphrase` / `Passphrase`
+- `encQuestionAnswer1..N` / `QuestionAnswer1..N`
+- `encTotpSecret1..N` / `TotpSecret1..N`
+- `encOtpCommand1..N` / `OtpCommand1..N`
 
 ---
 
-## Fase 7 — Interfaz ncurses completa (TUI 2.0)
+## Resumen archivos
 
-### 7.1 Organización por pestañas ⬜
-```
-┌──────────────────────────────────────┐
-│  tssh — Session Manager              │
-├──────────────────────────────────────┤
-│  [Hosts] [Tunnels] [Services] [Logs] │  ← pestañas
-├──────────────────────────────────────┤
-│                                      │
-│  ▐█ web-prod-1          [production] │
-│    web-prod-2            [production]│
-│                                      │
-├──────────────────────────────────────┤
-│  ▲▼ Navigate  ←→ Tabs  Enter Open   │
-└──────────────────────────────────────┘
-```
-
-### 7.2 Panel de Túneles ⬜
-- Integrar el gestor de túneles como panel dedicado.
-
-### 7.3 Panel de Servicios ⬜
-- Mostrar servicios detectados con iconos y colores.
-
-### 7.4 Panel de Logs ⬜
-- Logs en tiempo real de conexiones y túneles.
-
----
-
-## Resumen de archivos
-
-| Fase | Archivos nuevos | Archivos modificados |
-|------|----------------|---------------------|
-| 0 | — | `host_model.go`, `tools.go`, `console.go` |
-| 1 | — | `host_model.go`, `console.go`, `attach.go` |
-| 2 | `host_new.go` (pendiente) | `host_model.go`, `tools_new_host.go` |
-| 3 | — | `host_model.go` |
-| 4 | — | `host_model.go` |
-| 5 | `internal/session/`, `internal/driver/` | `tssh/login.go`, `tssh/main.go` |
-| 6 | `internal/discovery/`, `internal/port/`, `internal/service/`, `internal/config/`, `internal/log/` | — |
-| 7 | — | `host_model.go`, `tssh/main.go` |
+| Archivo | Rol |
+|---|---|
+| `tssh/host_model.go` | TUI principal (~3077 lines) |
+| `tssh/args.go` | CLI flags (180 lines) |
+| `tssh/config.go` | Config system (~931 lines) |
+| `tssh/tools.go` | Tools: enc-secret, list-hosts |
+| `tssh/tools_new_host.go` | New host CLI flow |
+| `tssh/tools_upload.go` | trz upload exec |
+| `tssh/trzsz.go` | trzsz/zmodem filter |
+| `tssh/udp.go` | UDP/KCP connection |
+| `tssh/dns.go` | Custom DNS |
+| `tssh/waypipe.go` | Wayland integration |
+| `tssh/console.go` | SSH escape console |
+| `tssh/expect.go` | Expect automation |
+| `tssh/otp.go` | TOTP/OTP auth |
+| `tssh/forward*.go` | Port forwarding |
+| `tssh/agent.go` | SSH agent |
+| `tssh/krb5.go` | Kerberos auth |
+| `tssh/algos.go` | Algorithm config |
+| `tssh/auth_method.go` | Auth methods |
+| `tssh/known_hosts.go` | Known hosts |
+| `tssh/lang.go` | i18n |
+| `tssh/login.go` | SSH login logic |
 
 ---
 
-## Prioridades inmediatas
+## Prioridades
 
-1. ✅ Fase 0 — Panics, navegación, ↓ a acciones
-2. ✅ Fase 1 — Fondo blanco, padding, attach/consola ncurses
-3. ⬜ Fase 2 — New host dentro del TUI (formulario inline)
-4. ✅ Fase 3 — Menú contextual (Edit/Tunnels/Delete)
-5. ✅ Fase 4 — Tunnel Manager (Manual/Auto, escaneo, persistencia)
-6. ⬜ Fase 5+ — Session Manager, Drivers, Discovery
+1. **Alta** — Ampliar Edit form (IdentityFile, ProxyJump, RemoteCommand, GroupLabels)
+2. **Alta** — Ampliar Config form (ConfigPath, ExConfigPath, UseOpenSSHConfig)
+3. **Alta** — Upload file en context menu
+4. **Media** — Port forwarding avanzado (L/R/D)
+5. **Media** — Password managers, TOTP/OTP editors
+6. **Media** — Install tools desde TUI
+7. **Baja** — UDP por host, Expect editor, Debug/Reconnect toggles
+8. **Baja** — exConfig editor completo

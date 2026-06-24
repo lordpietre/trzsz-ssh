@@ -24,6 +24,13 @@ type hostChoiceMsg struct {
 	quit       bool
 	newHost    bool
 	editConfig bool
+	download   *downloadReq
+}
+
+type downloadReq struct {
+	alias        string
+	remotePaths  string
+	localPath    string
 }
 
 type actionItem struct {
@@ -100,6 +107,20 @@ type newHostState struct {
 	err    string
 }
 
+type downloadField struct {
+	label string
+	value string
+	kind  string // "text" or "path"
+}
+
+type downloadState struct {
+	active bool
+	fields []downloadField
+	cursor int
+	alias  string
+	err    string
+}
+
 type configField struct {
 	key   string // config key name (lowercase)
 	label string
@@ -135,6 +156,7 @@ type hostModel struct {
 	edit               editState
 	newHost            newHostState
 	config             configState
+	download           downloadState
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -240,6 +262,21 @@ func (m *hostModel) getContextItems() []contextItem {
 			m.tunnel.view = "menu"
 			m.tunnel.alias = alias
 			m.tunnel.tunnels = tunnelLoadConfig(m.tunnel.tunnelConfigPath, alias)
+			return m, nil
+		}},
+		{"Download", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			if alias == "" {
+				return m, nil
+			}
+			m.download.active = true
+			m.download.cursor = 0
+			m.download.alias = alias
+			m.download.err = ""
+			m.download.fields = []downloadField{
+				{"Remote paths (space-separated)", "", "text"},
+				{"Local download path", userConfig.defaultDownloadPath, "path"},
+			}
 			return m, nil
 		}},
 		{"Delete", func() (tea.Model, tea.Cmd) {
@@ -447,6 +484,9 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.config.active {
 		return m.handleConfig(msg)
+	}
+	if m.download.active {
+		return m.handleDownload(msg)
 	}
 	if m.deleteAsk {
 		return m.handleDeleteConfirm(msg)
@@ -1030,6 +1070,8 @@ func (m *hostModel) View() tea.View {
 		m.renderNewHost(&b, availableHeight+detailLines+2)
 	} else if m.config.active {
 		m.renderConfigView(&b, availableHeight+detailLines+2)
+	} else if m.download.active {
+		m.renderDownloadView(&b, availableHeight+detailLines+2)
 	} else if m.deleteAsk {
 		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
 	} else if m.tunnel.active {
@@ -1081,7 +1123,7 @@ func (m *hostModel) View() tea.View {
 		}
 	}
 
-	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.config.active && !m.deleteAsk {
+	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.config.active && !m.download.active && !m.deleteAsk {
 		// --- separator ---
 		b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
@@ -1107,6 +1149,8 @@ func (m *hostModel) View() tea.View {
 		statusStr = "  Editing " + m.edit.fields[0].value + "  "
 	} else if m.newHost.active {
 		statusStr = "  Adding new host  "
+	} else if m.download.active {
+		statusStr = "  Download from " + m.download.alias + "  "
 	} else if m.config.active {
 		if m.config.saved {
 			statusStr = "  Config saved — restart to apply  "
@@ -2276,6 +2320,97 @@ func (m *hostModel) renderConfigView(b *strings.Builder, maxLines int) {
 	}
 }
 
+func (m *hostModel) handleDownload(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "up", "k", "shift+tab":
+		if m.download.cursor > 0 {
+			m.download.cursor--
+		}
+		return m, nil
+	case "down", "j", "tab":
+		if m.download.cursor < len(m.download.fields)-1 {
+			m.download.cursor++
+		}
+		return m, nil
+	case "enter":
+		paths := m.download.fields[0].value
+		if paths == "" {
+			m.download.err = "Remote paths are required"
+			return m, nil
+		}
+		m.done = true
+		m.result = hostChoiceMsg{
+			download: &downloadReq{
+				alias:       m.download.alias,
+				remotePaths: paths,
+				localPath:   m.download.fields[1].value,
+			},
+		}
+		return m, tea.Quit
+	case "esc":
+		m.download.active = false
+		m.download.err = ""
+		return m, nil
+	case "backspace":
+		f := &m.download.fields[m.download.cursor]
+		if len(f.value) > 0 {
+			f.value = f.value[:len(f.value)-1]
+		}
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		f := &m.download.fields[m.download.cursor]
+		f.value += txt
+		return m, nil
+	}
+}
+
+func (m *hostModel) renderDownloadView(b *strings.Builder, maxLines int) {
+	title := fmt.Sprintf("  ── Download from %s ──", m.download.alias)
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	for i, f := range m.download.fields {
+		if i >= maxLines-4 {
+			break
+		}
+		display := f.value
+		if display == "" {
+			display = "(empty)"
+		}
+		line := fmt.Sprintf("  %s: %s", f.label, display)
+		if i == m.download.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line+"▌")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   " + line) + "\n")
+		}
+	}
+
+	if m.download.err != "" {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠ " + m.download.err)) + "\n")
+	}
+
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to download  Esc cancel")) + "\n")
+
+	used := len(m.download.fields) + 3
+	if m.download.err != "" {
+		used += 2
+	}
+	for i := used; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
 func (m *hostModel) handleEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	txt := msg.Key().Text
@@ -2890,10 +3025,53 @@ func chooseAlias(keywords string) (string, bool, error) {
 			continue
 		}
 
+		if d := model.result.download; d != nil {
+			execDownload(d)
+			keywords = ""
+			continue
+		}
+
 		alias := model.result.alias
 		if alias != "" {
 			fmt.Fprintf(os.Stderr, "\033[0;32m➜ %s\033[0m\r\n", alias)
 		}
 		return alias, false, nil
 	}
+}
+
+func execDownload(d *downloadReq) {
+	alias := d.alias
+	remotePaths := d.remotePaths
+	localPath := d.localPath
+
+	args := []string{"-t", "--client"}
+	if localPath != "" {
+		args = append(args, "--download-path", localPath)
+	}
+	args = append(args, alias, fmt.Sprintf("tsz -d %s", remotePaths))
+
+	debug("exec download: tssh %v", args)
+
+	exe, err := os.Executable()
+	if err != nil {
+		warning("get executable path failed: %v", err)
+		return
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Fprintf(os.Stderr, "\r\n\033[0;32mDownloading from %s...\033[0m\r\n", alias)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;31mDownload failed: %v\033[0m\r\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "\r\n\033[0;32mDownload complete.\033[0m\r\n")
+	}
+	waitForEnterOnDownload()
+}
+
+func waitForEnterOnDownload() {
+	fmt.Fprintf(os.Stderr, "Press Enter to continue...")
+	_, _ = fmt.Scanln()
 }

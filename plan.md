@@ -9,38 +9,45 @@ actuales (panic en renderActions, navegación de acciones, new host fuera del TU
 
 | # | Tarea | Archivo | Estado |
 |---|-------|---------|--------|
-| 0.1 | Panic `strings: negative Repeat count` en `renderActions` | `host_model.go` | ✓ FIXED |
-| 0.2 | Navegación de acciones con ← → + Enter | `host_model.go` | ✓ FIXED |
-| 0.3 | Ayuda (`?`) implementada (showHelp) | `host_model.go` | ✓ FIXED |
-| 0.4 | ← → en listModel y menuModel | `tools.go`, `console.go` | ✓ FIXED |
+| 0.1 | Panic `strings: negative Repeat count` en `renderActions` | `host_model.go` | ✓ |
+| 0.2 | Navegación de acciones con ← → + Enter | `host_model.go` | ✓ |
+| 0.3 | Ayuda (`?`) implementada (showHelp) | `host_model.go` | ✓ |
+| 0.4 | ← → en listModel y menuModel | `tools.go`, `console.go` | ✓ |
 
 ---
 
 ## Fase 1 — Estabilizar TUI ncurses (fondo blanco siempre visible)
 
-### 1.1 Fondo blanco consistente en todas las vistas
-- **Qué**: Asegurar que `bgStyle` (fondo blanco `#15`) se aplique en TODA la pantalla,
-  sin huecos ni líneas sin fondo.
-- **Cómo**: En `View()`, cada línea debe renderizarse con `bgLine()` o `bgStyle`.
-  Revisar `renderDetails`, `renderActions`, `renderHelp`.
-- **Archivos**: `host_model.go`, `console.go`, `attach.go`, `tools.go`
+### 1.1 Fondo blanco en host_model ✓
+- `bgStyle` (fondo blanco ANSI 15) aplicado en todas las líneas.
+- Título con fondo azul, bordes con caracteres de caja.
+- `repeatSafe()` helper para evitar padding negativo.
+- Guard de tamaño mínimo de terminal (80x24).
 
-### 1.2 Ancho de terminal correcto con códigos ANSI
-- **Qué**: Toda medición de ancho visible debe usar `ansi.StringWidth()` o
-  `lipgloss.Width()` que ignoran códigos ANSI.
-- **Cómo**: Buscar todos los `runewidth.StringWidth()` y reemplazar donde
-  la entrada pueda contener ANSI. Ya corregido en `renderActions`.
-- **Archivos**: `host_model.go`, `console.go`, `attach.go`
+### 1.2 Consola ncurses (console.go) ✓
+- Migrado de tema oscuro (#1b1b32) a ncurses blanco.
+- Fondo blanco ANSI 15, texto negro, azul para items activos.
+- Cursor sólido `▐█` en item activo.
+- Bordes con caracteres de caja.
 
-### 1.3 Padding seguro (nunca negativo)
-- **Qué**: Toda llamada a `strings.Repeat(" ", N)` debe tener `max(N, 0)`.
-- **Cómo**: Crear helper `repeatSpace(n int)` que devuelva vacío si n < 0.
-- **Archivos**: `host_model.go`, `console.go`, `attach.go`
+### 1.3 Padding seguro (repeatSafe) ✓
+- Helper `repeatSafe(n int)` en `host_model.go`.
+- Reemplazados todos los `strings.Repeat(" ", N)` sin guard.
 
-### 1.4 Scroll suave en lista de hosts
-- **Qué**: Al llegar al final de la lista, el cursor no debe saltar.
-- **Cómo**: Verificar `scrollOffset` y `availableHeight` en `View()`.
-- **Archivos**: `host_model.go`
+### 1.4 Medición ANSI correcta ✓
+- `ansi.StringWidth()` usado en `renderActions` y console View.
+- `lipgloss.Width()` usado en `bgLine` y `renderHost`.
+
+### 1.5 Attach TUI ncurses (attach.go) ✓
+- Migrado de tema púrpura oscuro a ncurses blanco.
+- Panel dual (sesiones + preview) con bordes de caja.
+- Cursor sólido `▐█` en item activo.
+
+### 1.6 Tools UI ncurses (tools.go) ⬜
+- Migrar `listModel`, `textInputModel`, `passwordModel` a ncurses blanco.
+
+### 1.7 Scroll suave en lista de hosts ⬜
+- Verificar `scrollOffset` y `availableHeight`.
 
 ---
 

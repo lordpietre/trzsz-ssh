@@ -35,6 +35,7 @@ import (
 
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/trzsz/tsshd/tsshd"
 )
@@ -157,6 +158,26 @@ func (m *attachModel) View() tea.View {
 		return v
 	}
 
+	// ncurses colors
+	ncursesBg := lipgloss.Color("15")
+	ncursesFg := lipgloss.Color("0")
+	ncursesBlue := lipgloss.Color("4")
+	ncursesGrey := lipgloss.Color("8")
+
+	bgStyle := lipgloss.NewStyle().Background(ncursesBg).Foreground(ncursesFg)
+	titleStyle := lipgloss.NewStyle().Background(ncursesBlue).Foreground(lipgloss.Color("15")).Bold(true)
+	activeStyle := lipgloss.NewStyle().Background(ncursesBlue).Foreground(lipgloss.Color("15")).Bold(true)
+	inactiveStyle := lipgloss.NewStyle().Background(ncursesBg).Foreground(ncursesFg)
+	helpStyle := lipgloss.NewStyle().Background(ncursesBg).Foreground(ncursesGrey)
+
+	bgLine := func(s string) string {
+		w := lipgloss.Width(s)
+		if w < m.width {
+			s += strings.Repeat(" ", m.width-w)
+		}
+		return bgStyle.Render(s)
+	}
+
 	footerHeight := 2
 	boxHeight := m.height - footerHeight - 2
 	boxWidth := (m.width / 2) - 2
@@ -167,43 +188,47 @@ func (m *attachModel) View() tea.View {
 		return v
 	}
 
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7D56F4")).
-		Width(boxWidth).
-		Height(boxHeight)
+	var b strings.Builder
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4")).MarginBottom(1)
-	curStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7D56F4")).Bold(true)
-	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFF"))
+	// top border
+	b.WriteString(bgLine("┌"+strings.Repeat("─", m.width-2)+"┐") + "\n")
 
-	var leftView strings.Builder
-	leftView.WriteString(titleStyle.Render(" Sessions "))
-	leftView.WriteString("\n")
+	// title
+	title := "  Attach to Session  "
+	b.WriteString(bgLine(titleStyle.Render(" "+title+repeatSafe(m.width-3-ansi.StringWidth(title))+" ")) + "\n")
 
-	listAvailableHeight := boxHeight - 2
+	// separator
+	b.WriteString(bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
+
+	// Two-panel content
+	leftWidth := m.width/2 - 2
+	rightWidth := m.width - leftWidth - 4
+
+	listAvailableHeight := boxHeight
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	} else if m.cursor >= m.offset+listAvailableHeight {
 		m.offset = m.cursor - listAvailableHeight + 1
 	}
 
-	totalItems := len(m.items) + 1 // +1 for "New Session"
+	totalItems := len(m.items) + 1
+	var leftLines []string
 	for i := m.offset; i < m.offset+listAvailableHeight && i < totalItems; i++ {
 		cursorStr := "  "
 		if m.cursor == i {
-			cursorStr = "▶ "
+			cursorStr = "▐█ "
 		}
 
 		var row string
 		if i == 0 {
-			row = "✨ [Create a new session]"
+			row = "New session"
 		} else {
 			idx := i - 1
 			item := m.items[idx]
 			info := m.infos[idx]
 
-			name, title, startTime := "-", "-", "-"
+			name := "-"
+			startTime := "-"
 			if info != nil {
 				if info.Name != "" {
 					name = info.Name
@@ -211,40 +236,46 @@ func (m *attachModel) View() tea.View {
 				if info.Time > 0 {
 					startTime = time.Unix(info.Time, 0).Local().Format("2006-01-02 15:04")
 				}
-				if len(info.Sessions) > 0 && info.Sessions[0].Title != "" {
-					title = info.Sessions[0].Title
-				}
 			}
-
-			row = fmt.Sprintf("💻 %s | Name: %s | Title: %s | StartTime: %s", strconv.Itoa(item.Pid), name, title, startTime)
+			row = fmt.Sprintf("%s | %s | %s", strconv.Itoa(item.Pid), name, startTime)
 		}
-
-		row = clipString(cursorStr+row, boxWidth-2)
+		row = clipString(cursorStr+row, leftWidth)
 		if m.cursor == i {
-			leftView.WriteString(curStyle.Render(row) + "\n")
+			leftLines = append(leftLines, activeStyle.Render(row))
 		} else {
-			leftView.WriteString(lineStyle.Render(row) + "\n")
+			leftLines = append(leftLines, inactiveStyle.Render(row))
 		}
 	}
-	leftStr := boxStyle.Render(leftView.String())
 
-	var rightView strings.Builder
-	rightView.WriteString(titleStyle.Render(" Preview "))
-	rightView.WriteString("\n")
+	// fill remaining height
+	for len(leftLines) < listAvailableHeight {
+		leftLines = append(leftLines, inactiveStyle.Render(""))
+	}
 
-	clippedPreview := clipText(m.preview, boxWidth-2, boxHeight-4)
-	rightView.WriteString(clippedPreview)
+	// Render left + right panels side by side
+	previewLines := strings.Split(clipText(m.preview, rightWidth, boxHeight), "\n")
+	for i := 0; i < boxHeight; i++ {
+		left := leftLines[i] + repeatSafe(leftWidth-lipgloss.Width(leftLines[i]))
+		right := ""
+		if i < len(previewLines) {
+			right = previewLines[i] + repeatSafe(rightWidth-ansi.StringWidth(previewLines[i]))
+		} else {
+			right = repeatSafe(rightWidth)
+		}
+		b.WriteString(bgLine("  " + left + "  │  " + right + "  ") + "\n")
+	}
 
-	rightStr := boxStyle.Render(rightView.String())
+	// separator
+	b.WriteString(bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
-	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftStr, rightStr)
-	footer := lipgloss.NewStyle().MarginTop(1).Render(
-		"  Navigate : ↑/↓ · j/k · Tab/Shift+Tab    Select : Enter    Quit : q · Ctrl+C",
-	)
+	// footer
+	footer := "  ↑/↓ Navigate  Enter Select  q Quit  "
+	b.WriteString(bgLine(helpStyle.Render(footer+repeatSafe(m.width-1-ansi.StringWidth(footer)))) + "\n")
 
-	content := lipgloss.JoinVertical(lipgloss.Left, mainContent, footer)
+	// bottom border
+	b.WriteString(bgLine("└"+strings.Repeat("─", m.width-2)+"┘") + "\n")
 
-	v := tea.NewView(content)
+	v := tea.NewView(b.String())
 	v.AltScreen = true
 	return v
 }

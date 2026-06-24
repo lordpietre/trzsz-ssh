@@ -45,21 +45,32 @@ type tunnelEntry struct {
 	Cmd        *exec.Cmd `json:"-"`
 }
 
+type portInfo struct {
+	Port    int
+	Process string // process name from ss/netstat (e.g. "sshd", "nginx")
+}
+
+type dockerContainer struct {
+	Name  string
+	Ports string
+}
+
 type tunnelState struct {
-	active         bool
-	view           string // "menu", "manual_form", "auto_scanning", "auto_results", "form_ask_local"
-	alias          string
-	manualRemote   string
-	manualLocal    string
-	formField      int    // 0=remote, 1=local
-	scanPorts      []int
-	scanCursor     int
-	scanErr        string
-	askLocalRemote int // remote port being tunneled when asking for local port
-	tunnels        []*tunnelEntry
-	tunnelCursor   int
-	tunnelDelMode  bool
+	active           bool
+	view             string // "menu", "manual_form", "auto_scanning", "auto_results", "form_ask_local"
+	alias            string
+	manualRemote     string
+	manualLocal      string
+	formField        int    // 0=remote, 1=local
+	scanPorts        []portInfo
+	scanCursor       int
+	scanErr          string
+	askLocalRemote   int // remote port being tunneled when asking for local port
+	tunnels          []*tunnelEntry
+	tunnelCursor     int
+	tunnelDelMode    bool
 	tunnelConfigPath string
+	dockerContainers []dockerContainer
 }
 
 type editField struct {
@@ -74,6 +85,19 @@ type editState struct {
 	fields []editField
 	cursor int
 	hostIdx int
+}
+
+type newHostField struct {
+	label string
+	value string
+	kind  string // "text" or "password"
+}
+
+type newHostState struct {
+	active bool
+	fields []newHostField
+	cursor int
+	err    string
 }
 
 type hostModel struct {
@@ -94,6 +118,7 @@ type hostModel struct {
 	result             hostChoiceMsg
 	tunnel             tunnelState
 	edit               editState
+	newHost            newHostState
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -113,9 +138,17 @@ type hostModel struct {
 func (m *hostModel) getActions() []actionItem {
 	actions := []actionItem{
 		{"New", func() (tea.Model, tea.Cmd) {
-			m.done = true
-			m.result = hostChoiceMsg{newHost: true}
-			return m, tea.Quit
+			m.newHost.active = true
+			m.newHost.cursor = 0
+			m.newHost.err = ""
+			m.newHost.fields = []newHostField{
+				{"Alias", "", "text"},
+				{"HostName/IP", "", "text"},
+				{"Port", "22", "text"},
+				{"User", "", "text"},
+				{"Password", "", "password"},
+			}
+			return m, nil
 		}},
 		{"Search", func() (tea.Model, tea.Cmd) {
 			m.search = true
@@ -344,6 +377,7 @@ func (m *hostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tunnel.scanErr = msg.err.Error()
 		} else {
 			m.tunnel.scanPorts = msg.ports
+			m.tunnel.dockerContainers = msg.containers
 		}
 		m.tunnel.view = "auto_results"
 		return m, nil
@@ -377,6 +411,9 @@ func (m *hostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.search {
 		return m.handleSearch(msg)
+	}
+	if m.newHost.active {
+		return m.handleNewHost(msg)
 	}
 	if m.tunnel.active {
 		return m.handleTunnel(msg)
@@ -506,6 +543,7 @@ func (m *hostModel) handleTunnelMenu(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case 1:
 			m.tunnel.view = "auto_scanning"
 			m.tunnel.scanPorts = nil
+			m.tunnel.dockerContainers = nil
 			m.tunnel.scanErr = ""
 			return m, tunnelScanRemote(m.tunnel.alias)
 		}
@@ -590,7 +628,7 @@ func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea
 		}
 	case "enter":
 		if len(m.tunnel.scanPorts) > 0 {
-			m.tunnel.askLocalRemote = m.tunnel.scanPorts[m.tunnel.scanCursor]
+			m.tunnel.askLocalRemote = m.tunnel.scanPorts[m.tunnel.scanCursor].Port
 			m.tunnel.view = "form_ask_local"
 			m.tunnel.formField = 0
 			m.tunnel.manualLocal = ""
@@ -728,10 +766,18 @@ func (m *hostModel) handleNormal(s string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "left":
+		if len(m.filtered) == 0 {
+			m.actionCursor = 0
+			return m, nil
+		}
 		m.showContextMenu = true
 		m.contextCursor = 0
 		return m, nil
 	case "right":
+		if len(m.filtered) == 0 {
+			m.actionCursor = 0
+			return m, nil
+		}
 		m.showContextMenu = true
 		m.contextCursor = 0
 		return m, nil
@@ -953,6 +999,8 @@ func (m *hostModel) View() tea.View {
 
 	if m.edit.active {
 		m.renderEditView(&b, availableHeight+detailLines+2)
+	} else if m.newHost.active {
+		m.renderNewHost(&b, availableHeight+detailLines+2)
 	} else if m.deleteAsk {
 		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
 	} else if m.tunnel.active {
@@ -1004,7 +1052,7 @@ func (m *hostModel) View() tea.View {
 		}
 	}
 
-	if !m.tunnel.active && !m.edit.active && !m.deleteAsk {
+	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.deleteAsk {
 		// --- separator ---
 		b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
@@ -1028,6 +1076,8 @@ func (m *hostModel) View() tea.View {
 	var statusStr string
 	if m.edit.active {
 		statusStr = "  Editing " + m.edit.fields[0].value + "  "
+	} else if m.newHost.active {
+		statusStr = "  Adding new host  "
 	} else if m.deleteAsk && m.deleteIdx >= 0 && m.deleteIdx < len(m.hosts) {
 		statusStr = "  Delete " + m.hosts[m.deleteIdx].Alias + "?  "
 	} else if m.tunnel.active {
@@ -1415,11 +1465,26 @@ func (m *hostModel) renderTunnelScanning(b *strings.Builder, maxLines int) {
 	title := fmt.Sprintf("  ── Scanning %s ──", m.tunnel.alias)
 	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
 	b.WriteString(m.bgLine("") + "\n")
-	b.WriteString(m.bgLine("  Scanning remote ports...") + "\n")
+	b.WriteString(m.bgLine("  Scanning remote ports and Docker containers...") + "\n")
 	b.WriteString(m.bgLine("  (this may take a moment)") + "\n")
 	for i := 3; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
+}
+
+func formatPortLabel(p portInfo) string {
+	label := fmt.Sprintf("  %d", p.Port)
+	if p.Process != "" {
+		svc, known := wellKnownPorts[p.Port]
+		if known && svc != p.Process {
+			label += fmt.Sprintf("  %s (%s)", svc, p.Process)
+		} else {
+			label += fmt.Sprintf("  %s", p.Process)
+		}
+	} else if svc, known := wellKnownPorts[p.Port]; known {
+		label += fmt.Sprintf("  (%s)", svc)
+	}
+	return label
 }
 
 func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
@@ -1431,23 +1496,65 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 		return
 	}
 
-	if len(m.tunnel.scanPorts) == 0 {
-		b.WriteString(m.bgLine("  No open ports found.") + "\n")
+	totalPorts := len(m.tunnel.scanPorts)
+	totalDocker := len(m.tunnel.dockerContainers)
+
+	if totalPorts == 0 && totalDocker == 0 {
+		b.WriteString(m.bgLine("  No open ports or containers found.") + "\n")
 	}
 
-	for i, port := range m.tunnel.scanPorts {
-		if i >= maxLines-3 {
-			break
+	showPorts := totalPorts
+	showDocker := totalDocker
+	available := maxLines - 3 // leave room for help line
+	if totalPorts+totalDocker > available && totalDocker > 0 {
+		// Try to show at least some of both
+		portLines := available * totalPorts / (totalPorts + totalDocker)
+		if portLines < 1 {
+			portLines = 1
 		}
-		line := fmt.Sprintf("  Port %d", port)
+		dockerLines := available - portLines - 1 // 1 for docker header
+		if dockerLines < 1 {
+			showDocker = dockerLines
+			showPorts = available - 1
+		} else {
+			showPorts = portLines
+			showDocker = dockerLines
+		}
+	} else if totalPorts+totalDocker > available {
+		showPorts = available
+		showDocker = 0
+	}
+
+	// Render ports
+	rendered := 0
+	for i := 0; i < totalPorts && rendered < showPorts; i++ {
+		p := m.tunnel.scanPorts[i]
+		line := formatPortLabel(p)
 		if i == m.tunnel.scanCursor {
 			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line)) + "\n")
 		} else {
 			b.WriteString(m.bgLine(m.inactiveStyle.Render("   "+line)) + "\n")
 		}
+		rendered++
 	}
-	// fill
-	for i := len(m.tunnel.scanPorts); i < maxLines-2; i++ {
+
+	// Render Docker containers after ports
+	if totalDocker > 0 && showDocker > 0 {
+		b.WriteString(m.bgLine("") + "\n")
+		rendered++
+		dockerTitle := m.helpStyle.Render("  ── Docker Containers ──")
+		b.WriteString(m.bgLine(dockerTitle) + "\n")
+		rendered++
+		for i := 0; i < totalDocker && i < showDocker; i++ {
+			c := m.tunnel.dockerContainers[i]
+			line := fmt.Sprintf("  · %s   %s", c.Name, c.Ports)
+			b.WriteString(m.bgLine(m.inactiveStyle.Render(line)) + "\n")
+			rendered++
+		}
+	}
+
+	// fill remaining lines
+	for i := rendered; i < maxLines-2; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Select  Enter confirm  Esc back")) + "\n")
@@ -1497,6 +1604,44 @@ func (m *hostModel) renderEditView(b *strings.Builder, maxLines int) {
 	b.WriteString(m.bgLine("") + "\n")
 	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Tab navigate  Enter save  Esc cancel")) + "\n")
 	for i := len(m.edit.fields) + 3; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderNewHost(b *strings.Builder, maxLines int) {
+	title := "  ── New Host ──"
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	for i, f := range m.newHost.fields {
+		if i >= maxLines-4 {
+			break
+		}
+		label := fmt.Sprintf("  %s: ", f.label)
+		display := f.value
+		if f.kind == "password" && display != "" {
+			display = "••••••••"
+		}
+		line := label + display
+		if i == m.newHost.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line+"▌")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   " + line) + "\n")
+		}
+	}
+
+	if m.newHost.err != "" {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠ " + m.newHost.err)) + "\n")
+	}
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Tab navigate  Enter save  Esc cancel")) + "\n")
+
+	used := len(m.newHost.fields) + 3
+	if m.newHost.err != "" {
+		used += 2
+	}
+	for i := used; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 }
@@ -1576,8 +1721,9 @@ func deleteHost(alias string) {
 // --- Tunnel messages ---
 
 type tunnelScanResultMsg struct {
-	ports []int
-	err   error
+	ports       []portInfo
+	containers  []dockerContainer
+	err         error
 }
 
 type tunnelStartMsg struct {
@@ -1648,6 +1794,134 @@ func tunnelSaveConfig(tunnels []*tunnelEntry, path string) {
 	_ = os.WriteFile(path, data, 0600)
 }
 
+var wellKnownPorts = map[int]string{
+	20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet",
+	25: "smtp", 53: "dns", 80: "http", 110: "pop3",
+	143: "imap", 443: "https", 465: "smtps", 587: "submission",
+	993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle-db",
+	1701: "l2tp", 1723: "pptp", 2082: "cpanel", 2083: "cpanels",
+	2086: "webmin", 2087: "webmins", 2222: "directadmin",
+	3306: "mysql", 3389: "rdp", 3690: "svn", 5432: "postgresql",
+	5900: "vnc", 5901: "vnc-1", 5902: "vnc-2",
+	5985: "winrm-http", 5986: "winrm-https",
+	6379: "redis", 6443: "kube-api", 8000: "http-alt",
+	8080: "http-proxy", 8443: "https-alt", 9000: "php-fpm",
+	9090: "cockpit", 9100: "node-exporter", 9200: "elasticsearch",
+	9300: "es-cluster", 9443: "webmin-alt",
+	10000: "webmin-1", 11211: "memcached",
+	27017: "mongodb", 27018: "mongo-shard", 27019: "mongo-config",
+	32400: "plex",
+}
+
+func extractPortFromAddr(addr string) int {
+	last := strings.LastIndex(addr, ":")
+	if last < 0 {
+		return 0
+	}
+	portStr := addr[last+1:]
+	portStr = strings.TrimRight(portStr, "]")
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return 0
+	}
+	return port
+}
+
+func extractProcessSS(fields []string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	last := fields[len(fields)-1]
+	start := strings.Index(last, `(("`)
+	if start < 0 {
+		return ""
+	}
+	start += 3
+	end := strings.Index(last[start:], `"`)
+	if end < 0 {
+		return ""
+	}
+	return last[start : start+end]
+}
+
+func extractProcessNetstat(fields []string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	last := fields[len(fields)-1]
+	idx := strings.Index(last, "/")
+	if idx >= 0 && idx+1 < len(last) {
+		return last[idx+1:]
+	}
+	return last
+}
+
+func parsePortLine(line string) (port int, process string, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return 0, "", false
+	}
+
+	first := fields[0]
+	switch {
+	case first == "LISTEN":
+		// ss format: LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",...))
+		port = extractPortFromAddr(fields[3])
+		if port == 0 {
+			return 0, "", false
+		}
+		process = extractProcessSS(fields)
+		return port, process, true
+
+	case first == "tcp" || first == "tcp6":
+		// netstat format: tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 1234/sshd
+		if len(fields) < 7 {
+			return 0, "", false
+		}
+		port = extractPortFromAddr(fields[3])
+		if port == 0 {
+			return 0, "", false
+		}
+		process = extractProcessNetstat(fields)
+		return port, process, true
+
+	default:
+		// Fallback: scan all fields for :port (original behavior)
+		for _, f := range fields {
+			if strings.Contains(f, ":") {
+				parts := strings.Split(f, ":")
+				portStr := parts[len(parts)-1]
+				if strings.Contains(portStr, "-") {
+					continue
+				}
+				p, err := strconv.Atoi(portStr)
+				if err == nil && p > 0 && p < 65536 {
+					return p, "", true
+				}
+			}
+		}
+		return 0, "", false
+	}
+}
+
+func parseDockerOutput(output string) []dockerContainer {
+	var containers []dockerContainer
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) == 2 {
+			containers = append(containers, dockerContainer{
+				Name:  strings.TrimSpace(parts[0]),
+				Ports: strings.TrimSpace(parts[1]),
+			})
+		}
+	}
+	return containers
+}
+
 func tunnelScanRemote(alias string) tea.Cmd {
 	return func() tea.Msg {
 		client, err := SshLogin(&SshArgs{
@@ -1665,34 +1939,47 @@ func tunnelScanRemote(alias string) tea.Cmd {
 		}
 		defer session.Close()
 
-		output, err := session.Output("ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || ss -tln 2>/dev/null")
+		// Combined command: port scan + docker detection
+		output, err := session.Output(
+			`(ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || ss -tln 2>/dev/null || true) ` +
+				`&& echo "===DOCKER===" ` +
+				`&& (docker ps --format '{{.Names}}` + "\t" + `{{.Ports}}' 2>/dev/null || true)`,
+		)
 		if err != nil {
 			return tunnelScanResultMsg{err: fmt.Errorf("scan command failed: %v", err)}
 		}
 
-		// Parse output to find listening ports
-		var ports []int
+		parts := strings.SplitN(string(output), "===DOCKER===\n", 2)
+		scanOut := parts[0]
+		dockerOut := ""
+		if len(parts) > 1 {
+			dockerOut = strings.TrimSpace(parts[1])
+		}
+
+		// Parse listening ports with process info
+		var ports []portInfo
 		seen := make(map[int]bool)
-		lines := strings.Split(string(output), "\n")
-		for _, line := range lines {
-			fields := strings.Fields(line)
-			for _, f := range fields {
-				if strings.Contains(f, ":") {
-					parts := strings.Split(f, ":")
-					portStr := parts[len(parts)-1]
-					if strings.Contains(portStr, "-") {
-						continue
-					}
-					port, err := strconv.Atoi(portStr)
-					if err == nil && port > 0 && port < 65536 && !seen[port] {
-						seen[port] = true
-						ports = append(ports, port)
-					}
-				}
+		for _, line := range strings.Split(scanOut, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			first := strings.Fields(line)[0]
+			if first == "State" || first == "Proto" || first == "Netid" {
+				continue
+			}
+			port, process, ok := parsePortLine(line)
+			if ok && !seen[port] {
+				seen[port] = true
+				ports = append(ports, portInfo{Port: port, Process: process})
 			}
 		}
-		sort.Ints(ports)
-		return tunnelScanResultMsg{ports: ports, err: nil}
+		sort.Slice(ports, func(i, j int) bool { return ports[i].Port < ports[j].Port })
+
+		// Parse Docker containers
+		containers := parseDockerOutput(dockerOut)
+
+		return tunnelScanResultMsg{ports: ports, containers: containers, err: nil}
 	}
 }
 
@@ -1801,6 +2088,115 @@ func (m *hostModel) handleEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			f.value += txt
 		}
 		return m, nil
+	}
+}
+
+func (m *hostModel) handleNewHost(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "up", "k", "shift+tab":
+		if m.newHost.cursor > 0 {
+			m.newHost.cursor--
+		}
+	case "down", "j", "tab":
+		if m.newHost.cursor < len(m.newHost.fields)-1 {
+			m.newHost.cursor++
+		}
+	case "enter":
+		return m.saveNewHost()
+	case "esc":
+		m.newHost.active = false
+		m.newHost.err = ""
+	case "backspace":
+		f := &m.newHost.fields[m.newHost.cursor]
+		if len(f.value) > 0 {
+			f.value = f.value[:len(f.value)-1]
+		}
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		f := &m.newHost.fields[m.newHost.cursor]
+		if f.label == "Port" {
+			for _, r := range txt {
+				if r >= '0' && r <= '9' {
+					f.value += string(r)
+				}
+			}
+		} else {
+			f.value += txt
+		}
+	}
+	return m, nil
+}
+
+func (m *hostModel) saveNewHost() (tea.Model, tea.Cmd) {
+	fields := m.newHost.fields
+	if len(fields) < 4 {
+		return m, nil
+	}
+	alias := fields[0].value
+	hostName := fields[1].value
+	port := fields[2].value
+	user := fields[3].value
+	password := fields[4].value
+
+	if alias == "" || hostName == "" || user == "" {
+		m.newHost.err = "Alias, HostName/IP, and User are required"
+		return m, nil
+	}
+	if port == "" {
+		port = "22"
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		m.newHost.err = "Port must be a number between 1 and 65535"
+		return m, nil
+	}
+	// Check for duplicate alias
+	for _, h := range m.hosts {
+		if h.Alias == alias {
+			m.newHost.err = "Host alias already exists"
+			return m, nil
+		}
+	}
+
+	writeNewHostConfig(alias, hostName, port, user, password)
+
+	// Add to in-memory list
+	host := &sshHost{
+		Alias: alias,
+		Host:  hostName,
+		Port:  port,
+		User:  user,
+	}
+	m.hosts = append(m.hosts, host)
+	m.filtered = append(m.filtered, host)
+	m.newHost.active = false
+	m.newHost.err = ""
+	return m, nil
+}
+
+func writeNewHostConfig(alias, hostName, port, user, password string) {
+	path := userConfig.configPath
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "\nHost %s\n    HostName %s\n    Port %s\n    User %s\n", alias, hostName, port, user)
+	if password != "" {
+		secret, err := encodeSecret([]byte(password))
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(f, "    #!! encPassword %s\n    #!! encQuestionAnswer1 %s\n", secret, secret)
 	}
 }
 

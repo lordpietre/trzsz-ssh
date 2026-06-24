@@ -453,12 +453,12 @@ func (m *listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			m.quit = true
 			return m, tea.Quit
-		case "j", "tab", "down":
+		case "j", "tab", "down", "right":
 			m.cursor++
 			if m.cursor >= len(m.items) {
 				m.cursor = 0
 			}
-		case "k", "shift+tab", "up":
+		case "k", "shift+tab", "up", "left":
 			m.cursor--
 			if m.cursor < 0 {
 				m.cursor = len(m.items) - 1

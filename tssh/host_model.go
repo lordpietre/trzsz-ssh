@@ -17,10 +17,16 @@ type hostChoiceMsg struct {
 	newHost bool
 }
 
+type actionItem struct {
+	label string
+	exec  func() (tea.Model, tea.Cmd)
+}
+
 type hostModel struct {
 	hosts              []*sshHost
 	filtered           []*sshHost
 	cursor             int
+	actionCursor       int
 	filter             []byte
 	search             bool
 	showHelp           bool
@@ -38,13 +44,63 @@ type hostModel struct {
 	inactiveStyle      lipgloss.Style
 	activeSeleStyle    lipgloss.Style
 	inactiveSeleStyle  lipgloss.Style
+	actionFocusStyle   lipgloss.Style
+}
+
+func (m *hostModel) getActions() []actionItem {
+	actions := []actionItem{
+		{"New", func() (tea.Model, tea.Cmd) {
+			m.done = true
+			m.result = hostChoiceMsg{newHost: true}
+			return m, tea.Quit
+		}},
+		{"Search", func() (tea.Model, tea.Cmd) {
+			m.search = true
+			m.filter = []byte("/")
+			m.actionCursor = -1
+			return m, nil
+		}},
+		{"Select", func() (tea.Model, tea.Cmd) {
+			if m.termMgr != nil && m.cursor >= 0 && m.cursor < len(m.filtered) {
+				m.filtered[m.cursor].Selected = !m.filtered[m.cursor].Selected
+			}
+			return m, nil
+		}},
+	}
+	if m.termMgr != nil {
+		actions = append(actions,
+			actionItem{"Win", func() (tea.Model, tea.Cmd) {
+				return m.confirmBatch(openTermWindow)
+			}},
+			actionItem{"Tab", func() (tea.Model, tea.Cmd) {
+				return m.confirmBatch(openTermTab)
+			}},
+			actionItem{"Pane", func() (tea.Model, tea.Cmd) {
+				return m.confirmBatch(openTermPane)
+			}},
+		)
+	} else {
+		actions = append(actions, actionItem{"Enter", func() (tea.Model, tea.Cmd) {
+			if len(m.filtered) > 0 {
+				return m.confirm(m.cursor)
+			}
+			return m, nil
+		}})
+	}
+	actions = append(actions, actionItem{"Quit", func() (tea.Model, tea.Cmd) {
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	}})
+	return actions
 }
 
 func newHostModel(keywords string, hosts []*sshHost, termMgr terminalManager) *hostModel {
 	m := &hostModel{
-		hosts:    hosts,
-		filtered: hosts,
-		termMgr:  termMgr,
+		hosts:        hosts,
+		filtered:     hosts,
+		termMgr:      termMgr,
+		actionCursor: -1,
 	}
 	m.initStyles()
 	if keywords != "" {
@@ -79,6 +135,10 @@ func (m *hostModel) initStyles() {
 	m.actionStyle = lipgloss.NewStyle().
 		Background(ncursesBg).
 		Foreground(ncursesFg).
+		Bold(true)
+	m.actionFocusStyle = lipgloss.NewStyle().
+		Background(ncursesBlue).
+		Foreground(lipgloss.Color("15")).
 		Bold(true)
 	m.activeStyle = lipgloss.NewStyle().
 		Background(ncursesBlue).
@@ -212,18 +272,63 @@ func (m *hostModel) clampCursor() {
 }
 
 func (m *hostModel) handleNormal(s string) (tea.Model, tea.Cmd) {
+	actions := m.getActions()
+
+	if m.actionCursor >= 0 {
+		switch s {
+		case "left":
+			if m.actionCursor > 0 {
+				m.actionCursor--
+			}
+			return m, nil
+		case "right":
+			if m.actionCursor < len(actions)-1 {
+				m.actionCursor++
+			}
+			return m, nil
+		case "up", "k", "shift+tab", "down", "j", "tab":
+			m.actionCursor = -1
+			if s == "up" || s == "k" || s == "shift+tab" {
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			} else {
+				if m.cursor < len(m.filtered)-1 {
+					m.cursor++
+				}
+			}
+			return m, nil
+		case "enter":
+			return actions[m.actionCursor].exec()
+		case "ctrl+c", "ctrl+q":
+			m.done = true
+			m.result = hostChoiceMsg{quit: true}
+			return m, tea.Quit
+		default:
+			m.actionCursor = -1
+		}
+	}
+
 	switch s {
 	case "up", "k", "shift+tab":
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.actionCursor = -1
 	case "down", "j", "tab":
 		if m.cursor < len(m.filtered)-1 {
 			m.cursor++
 		}
-	case "left", "pgup", "ctrl+h", "ctrl+u", "ctrl+b":
+		m.actionCursor = -1
+	case "left":
+		m.actionCursor = 0
+		return m, nil
+	case "right":
+		m.actionCursor = len(actions) - 1
+		return m, nil
+	case "pgup", "ctrl+h", "ctrl+u", "ctrl+b":
 		m.pageMove(-1)
-	case "right", "pgdown", "ctrl+l", "ctrl+d", "ctrl+f":
+	case "pgdown", "ctrl+l", "ctrl+d", "ctrl+f":
 		m.pageMove(1)
 	case "home", "g":
 		m.cursor = 0
@@ -368,16 +473,20 @@ func (m *hostModel) View() tea.View {
 
 	var b strings.Builder
 
+	// Guard against tiny terminals
+	if m.width < 10 {
+		m.width = 80
+	}
+	if m.height < 10 {
+		m.height = 24
+	}
+
 	// --- top border ---
 	b.WriteString(m.bgLine("┌" + strings.Repeat("─", m.width-2) + "┐") + "\n")
 
 	// --- title bar with blue background ---
 	title := "  tssh — SSH Connection Manager  "
-	p := m.width - 3 - runewidth.StringWidth(title)
-	if p < 0 {
-		p = 0
-	}
-	titleRow := m.titleStyle.Render(" " + title + strings.Repeat(" ", p) + " ")
+	titleRow := m.titleStyle.Render(" " + title + repeatSafe(m.width-3-runewidth.StringWidth(title)) + " ")
 	b.WriteString(titleRow + "\n")
 
 	// --- separator ---
@@ -411,15 +520,20 @@ func (m *hostModel) View() tea.View {
 		scrollOffset = m.cursor - availableHeight + 1
 	}
 
-	// --- host list ---
-	for i := 0; i < availableHeight; i++ {
-		idx := scrollOffset + i
-		if idx < len(m.filtered) {
-			h := m.filtered[idx]
-			isActive := idx == m.cursor
-			m.renderHost(&b, h, isActive)
-		} else {
-			b.WriteString(m.bgLine("") + "\n")
+	if m.showHelp {
+		// --- help overlay instead of host list ---
+		m.renderHelp(&b, availableHeight)
+	} else {
+		// --- host list ---
+		for i := 0; i < availableHeight; i++ {
+			idx := scrollOffset + i
+			if idx < len(m.filtered) {
+				h := m.filtered[idx]
+				isActive := idx == m.cursor
+				m.renderHost(&b, h, isActive)
+			} else {
+				b.WriteString(m.bgLine("") + "\n")
+			}
 		}
 	}
 
@@ -427,7 +541,7 @@ func (m *hostModel) View() tea.View {
 	b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
 	// --- details (limited to detailLines so we never overflow) ---
-	if m.cursor >= 0 && m.cursor < len(m.filtered) {
+	if !m.showHelp && m.cursor >= 0 && m.cursor < len(m.filtered) {
 		m.renderDetails(&b, m.filtered[m.cursor], detailLines)
 	}
 
@@ -435,12 +549,7 @@ func (m *hostModel) View() tea.View {
 	b.WriteString(m.bgLine("└"+strings.Repeat("─", m.width-2)+"┘") + "\n")
 
 	// --- action buttons bar ---
-	actionBar := "   [ New ]   [ Search ]   [ Select ]   [ Enter ]   [ Quit ]"
-	if m.termMgr != nil {
-		actionBar = "   [ New ]   [ Search ]   [ Select ]   [ Win ]   [ Tab ]   [ Pane ]   [ Quit ]"
-	}
-	actionsPadded := actionBar + strings.Repeat(" ", m.width-runewidth.StringWidth(actionBar)-1)
-	b.WriteString(m.actionStyle.Render(actionsPadded) + "\n")
+	m.renderActions(&b)
 
 	// --- status line ---
 	statusStr := fmt.Sprintf("  %s | %d/%d  ",
@@ -581,6 +690,58 @@ func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost, maxLines int) 
 			line = clipString(line, width)
 			b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
 			written++
+		}
+	}
+}
+
+func repeatSafe(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(" ", n)
+}
+
+func (m *hostModel) renderActions(b *strings.Builder) {
+	actions := m.getActions()
+	var bar strings.Builder
+	bar.WriteString("  ")
+	for i, a := range actions {
+		if i > 0 {
+			bar.WriteString("   ")
+		}
+		label := "[" + a.label + "]"
+		if i == m.actionCursor {
+			bar.WriteString(m.actionFocusStyle.Render(label))
+		} else {
+			bar.WriteString(m.actionStyle.Render(label))
+		}
+	}
+	visible := ansi.StringWidth(bar.String())
+	padded := bar.String() + repeatSafe(m.width-visible-1)
+	b.WriteString(m.bgStyle.Render(padded) + "\n")
+}
+
+func (m *hostModel) renderHelp(b *strings.Builder, maxLines int) {
+	helpLines := []string{
+		"  ↑/↓  Navigate list               ←/→  Navigate actions",
+		"  j/k  Navigate (vim)              g/G  First/Last",
+		"  /    Search filter                Esc  Clear search",
+		"  Enter  Select host                n    Add new host",
+		"  Space  Toggle select              ?    Toggle help",
+		"  q/Ctrl+C  Quit",
+	}
+	if m.termMgr != nil {
+		helpLines = append(helpLines,
+			"  w/Ctrl+W  Open in window         t/Ctrl+T  Open in tab",
+			"  p/Ctrl+P  Open in pane           a/Ctrl+A  Select all",
+			"  o/Ctrl+O  Invert selection",
+		)
+	}
+	for i := 0; i < maxLines; i++ {
+		if i < len(helpLines) {
+			b.WriteString(m.bgLine(m.helpStyle.Render(helpLines[i])) + "\n")
+		} else {
+			b.WriteString(m.bgLine("") + "\n")
 		}
 	}
 }

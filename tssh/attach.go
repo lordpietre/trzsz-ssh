@@ -164,7 +164,6 @@ func (m *attachModel) View() tea.View {
 	ncursesBlue := lipgloss.Color("4")
 	ncursesGrey := lipgloss.Color("8")
 
-	bgStyle := lipgloss.NewStyle().Background(ncursesBg).Foreground(ncursesFg)
 	titleStyle := lipgloss.NewStyle().Background(ncursesBlue).Foreground(lipgloss.Color("15")).Bold(true)
 	activeStyle := lipgloss.NewStyle().Background(ncursesBlue).Foreground(lipgloss.Color("15")).Bold(true)
 	inactiveStyle := lipgloss.NewStyle().Background(ncursesBg).Foreground(ncursesFg)
@@ -175,7 +174,10 @@ func (m *attachModel) View() tea.View {
 		if w < m.width {
 			s += strings.Repeat(" ", m.width-w)
 		}
-		return bgStyle.Render(s)
+		const resetSeq = "\x1b[0m"
+		const reApply = "\x1b[0m\x1b[47m\x1b[30m"
+		s = strings.ReplaceAll(s, resetSeq, reApply)
+		return "\x1b[47m\x1b[30m" + s + resetSeq
 	}
 
 	footerHeight := 2

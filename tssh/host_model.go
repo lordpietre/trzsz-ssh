@@ -3,12 +3,15 @@ package tssh
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -59,6 +62,20 @@ type tunnelState struct {
 	tunnelConfigPath string
 }
 
+type editField struct {
+	label     string
+	value     string
+	configKey string // "HostName", "Port", "User", "Password"
+	kind      string // "text" or "password"
+}
+
+type editState struct {
+	active bool
+	fields []editField
+	cursor int
+	hostIdx int
+}
+
 type hostModel struct {
 	hosts              []*sshHost
 	filtered           []*sshHost
@@ -68,6 +85,7 @@ type hostModel struct {
 	search             bool
 	showHelp           bool
 	showContextMenu    bool
+	showSystem         bool
 	contextCursor      int
 	termMgr            terminalManager
 	width              int
@@ -75,6 +93,9 @@ type hostModel struct {
 	done               bool
 	result             hostChoiceMsg
 	tunnel             tunnelState
+	edit               editState
+	deleteAsk          bool
+	deleteIdx          int
 	titleStyle         lipgloss.Style
 	bgStyle            lipgloss.Style
 	helpStyle          lipgloss.Style
@@ -139,15 +160,22 @@ func (m *hostModel) getActions() []actionItem {
 
 func (m *hostModel) getContextItems() []contextItem {
 	alias := ""
+	hostIdx := -1
 	if m.cursor >= 0 && m.cursor < len(m.filtered) {
 		alias = m.filtered[m.cursor].Alias
+		hostIdx = m.cursor
 	}
 	return []contextItem{
 		{"Edit", func() (tea.Model, tea.Cmd) {
 			m.showContextMenu = false
-			m.done = true
-			m.result = hostChoiceMsg{editConfig: true}
-			return m, tea.Quit
+			if alias == "" {
+				return m, nil
+			}
+			m.edit.active = true
+			m.edit.cursor = 0
+			m.edit.hostIdx = hostIdx
+			m.edit.fields = buildEditFields(alias)
+			return m, nil
 		}},
 		{"Tunnels", func() (tea.Model, tea.Cmd) {
 			m.showContextMenu = false
@@ -159,12 +187,18 @@ func (m *hostModel) getContextItems() []contextItem {
 		}},
 		{"Delete", func() (tea.Model, tea.Cmd) {
 			m.showContextMenu = false
-			if alias != "" {
-				deleteHost(alias)
-				m.hosts = getAllHosts()
-				m.applyFilter()
-				m.clampCursor()
+			if alias == "" {
+				return m, nil
 			}
+			// Find real index in m.hosts (not m.filtered)
+			m.deleteIdx = -1
+			for i, h := range m.hosts {
+				if h.Alias == alias {
+					m.deleteIdx = i
+					break
+				}
+			}
+			m.deleteAsk = true
 			return m, nil
 		}},
 	}
@@ -180,7 +214,9 @@ func newHostModel(keywords string, hosts []*sshHost, termMgr terminalManager) *h
 			tunnelConfigPath: tunnelDefaultPath(),
 		},
 	}
+	m.loadMetaIntoHosts()
 	m.initStyles()
+	m.applyFilter()
 	if keywords != "" {
 		m.search = true
 		m.filter = []byte(keywords)
@@ -193,53 +229,57 @@ func newHostModel(keywords string, hosts []*sshHost, termMgr terminalManager) *h
 }
 
 func (m *hostModel) initStyles() {
-	ncursesBg := lipgloss.Color("15")  // white
-	ncursesFg := lipgloss.Color("0")   // black
-	ncursesBlue := lipgloss.Color("4") // dark blue
+	white := lipgloss.Color("15")
+	black := lipgloss.Color("0")
+	blue := lipgloss.Color("4")
+	grey := lipgloss.Color("8")
+	green := lipgloss.Color("10")
 
 	m.bgStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(ncursesFg)
+		Background(white).
+		Foreground(black)
 	m.titleStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("4")).
-		Foreground(lipgloss.Color("15")).
+		Background(white).
+		Foreground(blue).
 		Bold(true)
 	m.helpStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(lipgloss.Color("8"))
+		Background(white).
+		Foreground(grey)
 	m.labelStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(ncursesBlue)
+		Background(white).
+		Foreground(blue)
 	m.actionStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(ncursesFg).
+		Background(white).
+		Foreground(black).
 		Bold(true)
 	m.actionFocusStyle = lipgloss.NewStyle().
-		Background(ncursesBlue).
-		Foreground(lipgloss.Color("15")).
-		Bold(true)
+		Background(white).
+		Foreground(blue).
+		Bold(true).
+		Underline(true)
 	m.activeStyle = lipgloss.NewStyle().
-		Background(ncursesBlue).
-		Foreground(lipgloss.Color("15")).
+		Background(white).
+		Foreground(blue).
 		Bold(true)
 	m.inactiveStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(ncursesFg)
+		Background(white).
+		Foreground(black)
 	m.activeSeleStyle = lipgloss.NewStyle().
-		Background(ncursesBlue).
-		Foreground(lipgloss.Color("10")).
+		Background(white).
+		Foreground(green).
 		Bold(true)
 	m.inactiveSeleStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(lipgloss.Color("10")).
+		Background(white).
+		Foreground(green).
 		Bold(true)
 	m.contextMenuStyle = lipgloss.NewStyle().
-		Background(ncursesBg).
-		Foreground(ncursesFg)
+		Background(white).
+		Foreground(black)
 	m.contextActStyle = lipgloss.NewStyle().
-		Background(ncursesBlue).
-		Foreground(lipgloss.Color("15")).
-		Bold(true)
+		Background(white).
+		Foreground(blue).
+		Bold(true).
+		Underline(true)
 }
 
 func (m *hostModel) applyFilter() {
@@ -248,17 +288,38 @@ func (m *hostModel) applyFilter() {
 		raw = string(m.filter)
 	}
 	if raw == "" || raw == "/" {
-		m.filtered = m.hosts
+		if m.showSystem {
+			m.filtered = m.hosts
+		} else {
+			m.filtered = nil
+			for _, h := range m.hosts {
+				if !h.System {
+					m.filtered = append(m.filtered, h)
+				}
+			}
+		}
 		return
 	}
 	trimmed := strings.TrimPrefix(raw, "/")
 	keywords := strings.Fields(strings.ToLower(trimmed))
 	if len(keywords) == 0 {
-		m.filtered = m.hosts
+		if m.showSystem {
+			m.filtered = m.hosts
+		} else {
+			m.filtered = nil
+			for _, h := range m.hosts {
+				if !h.System {
+					m.filtered = append(m.filtered, h)
+				}
+			}
+		}
 		return
 	}
 	var filtered []*sshHost
 	for _, h := range m.hosts {
+		if !m.showSystem && h.System {
+			continue
+		}
 		if matchHost(h, keywords) {
 			filtered = append(filtered, h)
 		}
@@ -319,6 +380,12 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.tunnel.active {
 		return m.handleTunnel(msg)
+	}
+	if m.edit.active {
+		return m.handleEdit(msg)
+	}
+	if m.deleteAsk {
+		return m.handleDeleteConfirm(msg)
 	}
 	return m.handleNormal(msg.String())
 }
@@ -700,6 +767,9 @@ func (m *hostModel) handleNormal(s string) (tea.Model, tea.Cmd) {
 	case "e", "ctrl+e":
 		m.filter = nil
 		m.applyFilter()
+	case "S":
+		m.showSystem = !m.showSystem
+		m.applyFilter()
 	case " ", "ctrl+x", "ctrl+space":
 		if m.termMgr != nil && m.cursor >= 0 && m.cursor < len(m.filtered) {
 			m.filtered[m.cursor].Selected = !m.filtered[m.cursor].Selected
@@ -780,6 +850,10 @@ func (m *hostModel) confirm(idx int) (tea.Model, tea.Cmd) {
 	if len(sel) == 0 && idx >= 0 && idx < len(m.filtered) {
 		sel = []*sshHost{m.filtered[idx]}
 	}
+	// Update last login timestamp
+	for _, h := range sel {
+		metaUpdateLastLogin(h.Alias)
+	}
 	m.result = hostChoiceMsg{alias: sel[0].Alias}
 	m.done = true
 	if m.termMgr != nil && len(sel) > 1 {
@@ -797,6 +871,10 @@ func (m *hostModel) confirmBatch(openType int) (tea.Model, tea.Cmd) {
 	if len(sel) == 0 && m.cursor >= 0 && m.cursor < len(m.filtered) {
 		m.filtered[m.cursor].Selected = true
 		sel = []*sshHost{m.filtered[m.cursor]}
+	}
+	// Update last login timestamp
+	for _, h := range sel {
+		metaUpdateLastLogin(h.Alias)
 	}
 	m.result = hostChoiceMsg{alias: sel[0].Alias}
 	m.done = true
@@ -826,9 +904,9 @@ func (m *hostModel) View() tea.View {
 	// --- top border ---
 	b.WriteString(m.bgLine("┌" + strings.Repeat("─", m.width-2) + "┐") + "\n")
 
-	// --- title bar with blue background ---
+	// --- title bar ---
 	title := "  tssh — SSH Connection Manager  "
-	titleRow := m.titleStyle.Render(" " + title + repeatSafe(m.width-3-runewidth.StringWidth(title)) + " ")
+	titleRow := m.titleStyle.Render(" " + title + repeatSafe(m.width-2-runewidth.StringWidth(title)) + " ")
 	b.WriteString(titleRow + "\n")
 
 	// --- separator ---
@@ -840,6 +918,17 @@ func (m *hostModel) View() tea.View {
 		b.WriteString(m.bgLine("  " + filterText) + "\n")
 	} else {
 		info := fmt.Sprintf("  %d hosts", len(m.filtered))
+		sysCount := 0
+		if !m.showSystem {
+			for _, h := range m.hosts {
+				if h.System {
+					sysCount++
+				}
+			}
+			if sysCount > 0 {
+				info += fmt.Sprintf(" (hiding %d system, S to show)", sysCount)
+			}
+		}
 		if len(m.filtered) != len(m.hosts) {
 			info += fmt.Sprintf(" (%d total)", len(m.hosts))
 		}
@@ -862,14 +951,48 @@ func (m *hostModel) View() tea.View {
 		scrollOffset = m.cursor - availableHeight + 1
 	}
 
-	if m.tunnel.active {
+	if m.edit.active {
+		m.renderEditView(&b, availableHeight+detailLines+2)
+	} else if m.deleteAsk {
+		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
+	} else if m.tunnel.active {
 		m.renderTunnelView(&b, availableHeight+detailLines+2)
 	} else if m.showHelp {
 		// --- help overlay instead of host list ---
 		m.renderHelp(&b, availableHeight)
 	} else {
 		// --- host list ---
-		for i := 0; i < availableHeight; i++ {
+		// Column widths
+		aliasW := m.width / 3
+		if aliasW < 15 {
+			aliasW = 15
+		}
+		ipW := m.width / 3
+		if ipW < 15 {
+			ipW = 15
+		}
+		loginW := m.width - aliasW - ipW - 6
+		if loginW < 10 {
+			loginW = 10
+		}
+		// Reserve space for the header
+		listHeight := availableHeight - 1
+		if listHeight < 1 {
+			listHeight = 1
+		}
+		scrollOffset = 0
+		if m.cursor >= listHeight {
+			scrollOffset = m.cursor - listHeight + 1
+		}
+
+		// Column header
+		aliasHdr := "Host" + repeatSafe(aliasW-4)
+		ipHdr := "HostName" + repeatSafe(ipW-8)
+		loginHdr := "Last Login" + repeatSafe(loginW-10)
+		header := m.labelStyle.Render("  " + aliasHdr + " " + ipHdr + " " + loginHdr)
+		b.WriteString(m.bgLine(header) + "\n")
+
+		for i := 0; i < listHeight; i++ {
 			idx := scrollOffset + i
 			if idx < len(m.filtered) {
 				h := m.filtered[idx]
@@ -881,7 +1004,7 @@ func (m *hostModel) View() tea.View {
 		}
 	}
 
-	if !m.tunnel.active {
+	if !m.tunnel.active && !m.edit.active && !m.deleteAsk {
 		// --- separator ---
 		b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
@@ -903,7 +1026,11 @@ func (m *hostModel) View() tea.View {
 
 	// --- status line ---
 	var statusStr string
-	if m.tunnel.active {
+	if m.edit.active {
+		statusStr = "  Editing " + m.edit.fields[0].value + "  "
+	} else if m.deleteAsk && m.deleteIdx >= 0 && m.deleteIdx < len(m.hosts) {
+		statusStr = "  Delete " + m.hosts[m.deleteIdx].Alias + "?  "
+	} else if m.tunnel.active {
 		statusStr = "  Tunnels for " + m.tunnel.alias + "  "
 	} else if len(m.filtered) == 0 {
 		statusStr = "  No hosts found. Press [N] to add one.  "
@@ -915,27 +1042,27 @@ func (m *hostModel) View() tea.View {
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true
+	v.BackgroundColor = color.RGBA{255, 255, 255, 255}
 	return v
 }
 
 func (m *hostModel) bgLine(s string) string {
-	// Use lipgloss.Width which strips ANSI escape codes before measuring.
 	w := lipgloss.Width(s)
 	if w < m.width {
 		s += strings.Repeat(" ", m.width-w)
 	}
-	return m.bgStyle.Render(s)
+	return s
 }
 
 func (m *hostModel) renderHost(b *strings.Builder, h *sshHost, isActive bool) {
 	pad := "  "
 	if isActive {
-		pad = "▐█ " // ncurses-style solid cursor
+		pad = "▐█ "
 	}
 	selIcon := "  "
 	selStyle := m.inactiveSeleStyle
 	if h.Selected {
-		selIcon = "▐✓ " // checkmark with border
+		selIcon = "▐✓ "
 		if isActive {
 			selStyle = m.activeSeleStyle
 		}
@@ -948,14 +1075,62 @@ func (m *hostModel) renderHost(b *strings.Builder, h *sshHost, isActive bool) {
 		style = m.inactiveStyle
 	}
 
-	line := fmt.Sprintf("%s%s%s", pad, selStyle.Render(selIcon), style.Render(" "+h.Alias+" "))
-	if h.Host != "" && h.Host != h.Alias {
-		line += m.helpStyle.Render(fmt.Sprintf("  (%s)", h.Host))
+	// Column widths (proportional to terminal width)
+	aliasW := m.width / 3
+	if aliasW < 15 {
+		aliasW = 15
 	}
+	ipW := m.width / 3
+	if ipW < 15 {
+		ipW = 15
+	}
+	loginW := m.width - aliasW - ipW - 8
+	if loginW < 10 {
+		loginW = 10
+	}
+
+	// Build alias column
+	alias := h.Alias
+	if ansi.StringWidth(alias) > aliasW-1 {
+		alias = ansi.Truncate(alias, aliasW-1, "")
+	}
+
+	// Build IP column
+	ip := h.Host
+	if ip == "" {
+		ip = h.Alias
+	}
+	if ansi.StringWidth(ip) > ipW-1 {
+		ip = ansi.Truncate(ip, ipW-1, "")
+	}
+
+	// Build last login column
+	login := h.LastLogin
+	if login == "" {
+		login = "—"
+	}
+	if ansi.StringWidth(login) > loginW-1 {
+		login = ansi.Truncate(login, loginW-1, "")
+	}
+
+	// Groups badge
+	groups := ""
 	if h.GroupLabels != "" {
-		line += m.labelStyle.Render(fmt.Sprintf("  [%s]", h.GroupLabels))
+		groups = m.labelStyle.Render(" [" + h.GroupLabels + "]")
 	}
-	// ansi.Truncate is ANSI-aware: it measures visible width only, preserving colour codes.
+
+	// Pad each column to its width
+	aliasPad := repeatSafe(aliasW - ansi.StringWidth(alias))
+	ipPad := repeatSafe(ipW - ansi.StringWidth(ip))
+
+	line := fmt.Sprintf("%s%s%s%s%s%s",
+		pad,
+		selStyle.Render(selIcon),
+		style.Render(" "+alias+aliasPad+" "),
+		m.helpStyle.Render(ip+ipPad),
+		m.helpStyle.Render(" "+login),
+		groups)
+
 	if lipgloss.Width(line) > m.width-1 {
 		line = ansi.Truncate(line, m.width-1, "")
 	}
@@ -1104,9 +1279,7 @@ func (m *hostModel) renderActions(b *strings.Builder) {
 			bar.WriteString(m.actionStyle.Render(label))
 		}
 	}
-	visible := ansi.StringWidth(bar.String())
-	padded := bar.String() + repeatSafe(m.width-visible-1)
-	b.WriteString(m.bgStyle.Render(padded) + "\n")
+	b.WriteString(m.bgLine(bar.String()) + "\n")
 }
 
 func (m *hostModel) renderHelp(b *strings.Builder, maxLines int) {
@@ -1116,7 +1289,7 @@ func (m *hostModel) renderHelp(b *strings.Builder, maxLines int) {
 		"  /    Search filter                Esc  Clear search",
 		"  Enter  Select host                n    Add new host",
 		"  Space  Toggle select              ?    Toggle help",
-		"  q/Ctrl+C  Quit",
+		"  S    Toggle system hosts          q/Ctrl+C  Quit",
 	}
 	if m.termMgr != nil {
 		helpLines = append(helpLines,
@@ -1294,6 +1467,56 @@ func (m *hostModel) renderTunnelAskLocal(b *strings.Builder, maxLines int) {
 	b.WriteString(m.bgLine("") + "\n")
 	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to create  Esc to go back")) + "\n")
 	for i := 5; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderEditView(b *strings.Builder, maxLines int) {
+	title := fmt.Sprintf("  ── Edit %s ──", m.edit.fields[0].value)
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	for i, f := range m.edit.fields {
+		if i >= maxLines-3 {
+			break
+		}
+		label := fmt.Sprintf("  %s: ", f.label)
+		display := f.value
+		if f.kind == "password" {
+			if display != "" {
+				display = "••••••••"
+			}
+		}
+		line := label + display
+		if i == m.edit.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line+"▌")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   " + line) + "\n")
+		}
+	}
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Tab navigate  Enter save  Esc cancel")) + "\n")
+	for i := len(m.edit.fields) + 3; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderDeleteAsk(b *strings.Builder, maxLines int) {
+	alias := ""
+	if m.deleteIdx >= 0 && m.deleteIdx < len(m.hosts) {
+		alias = m.hosts[m.deleteIdx].Alias
+	}
+	title := "  ── Confirm Delete ──"
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(fmt.Sprintf("  Delete host \"%s\"?", alias)) + "\n")
+	b.WriteString(m.bgLine("  This will remove it from "+userConfig.configPath) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.activeStyle.Render("▐█ [Yes]")) + "\n")
+	b.WriteString(m.bgLine("   [No]") + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to confirm  Esc to cancel")) + "\n")
+	for i := 8; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 }
@@ -1517,6 +1740,482 @@ func tunnelStopProcess(entry *tunnelEntry) tea.Cmd {
 		}
 		entry.Active = false
 		return tunnelStopMsg{entry: entry, err: nil}
+	}
+}
+
+// --- Edit functions ---
+
+func buildEditFields(alias string) []editField {
+	host, port, user := resolveHostPortUser(alias)
+	pw := getExConfig(alias, "Password")
+	return []editField{
+		{"Alias", alias, "", "text"},
+		{"HostName", host, "HostName", "text"},
+		{"Port", port, "Port", "text"},
+		{"User", user, "User", "text"},
+		{"Password", pw, "Password", "password"},
+	}
+}
+
+func (m *hostModel) handleEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "up", "k", "shift+tab":
+		if m.edit.cursor > 0 {
+			m.edit.cursor--
+		}
+		return m, nil
+	case "down", "j", "tab":
+		if m.edit.cursor < len(m.edit.fields)-1 {
+			m.edit.cursor++
+		}
+		return m, nil
+	case "enter":
+		return m.saveEdit()
+	case "esc":
+		m.edit.active = false
+		return m, nil
+	case "backspace":
+		f := &m.edit.fields[m.edit.cursor]
+		if len(f.value) > 0 {
+			f.value = f.value[:len(f.value)-1]
+		}
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		f := &m.edit.fields[m.edit.cursor]
+		if f.configKey == "Port" {
+			for _, r := range txt {
+				if r >= '0' && r <= '9' {
+					f.value += string(r)
+				}
+			}
+		} else {
+			f.value += txt
+		}
+		return m, nil
+	}
+}
+
+func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
+	fields := m.edit.fields
+	if len(fields) < 4 {
+		m.edit.active = false
+		return m, nil
+	}
+	newAlias := fields[0].value
+	hostName := fields[1].value
+	port := fields[2].value
+	user := fields[3].value
+	pw := fields[4].value
+
+	origAlias := ""
+	hostIdx := m.edit.hostIdx
+	if hostIdx >= 0 && hostIdx < len(m.hosts) {
+		origAlias = m.hosts[hostIdx].Alias
+	}
+
+	if origAlias == "" {
+		m.edit.active = false
+		return m, nil
+	}
+
+	// Update main SSH config
+	updateHostConfig(origAlias, newAlias, hostName, port, user)
+
+	// Update password in extended config
+	updatePasswordConfig(origAlias, pw)
+
+	// Fix filtered reference
+	if hostIdx >= 0 && hostIdx < len(m.hosts) {
+		m.hosts[hostIdx].Alias = newAlias
+		m.hosts[hostIdx].Host = hostName
+		m.hosts[hostIdx].Port = port
+		m.hosts[hostIdx].User = user
+	}
+	// If alias changed, also update filtered entries
+	for i := range m.filtered {
+		if m.filtered[i] == m.hosts[hostIdx] {
+			m.filtered[i] = m.hosts[hostIdx]
+			break
+		}
+	}
+	// If alias changed and we were on this host, update the reference
+	if m.cursor >= 0 && m.cursor < len(m.filtered) {
+		if m.filtered[m.cursor].Alias == origAlias {
+			// Fine, already updated
+		}
+	}
+
+	m.edit.active = false
+	return m, nil
+}
+
+func resolveHostPortUser(alias string) (string, string, string) {
+	h := getConfig(alias, "HostName")
+	if h == "" {
+		h = alias
+	}
+	p := getConfig(alias, "Port")
+	if p == "" {
+		p = "22"
+	}
+	u := getConfig(alias, "User")
+	return h, p, u
+}
+
+func updateHostConfig(origAlias, newAlias, hostName, port, user string) {
+	path := userConfig.configPath
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	inBlock := false
+	var result []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lowTrim, "host ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == origAlias {
+				inBlock = true
+				// Replace Host line if alias changed
+				if newAlias != origAlias {
+					line = strings.Replace(line, origAlias, newAlias, 1)
+				}
+				result = append(result, line)
+				continue
+			}
+			inBlock = false
+			result = append(result, line)
+			continue
+		}
+
+		if !inBlock {
+			result = append(result, line)
+			continue
+		}
+
+		// Inside the target host block — update directives
+		lowLine := strings.ToLower(trimmed)
+		// Skip lines we are replacing
+		if strings.HasPrefix(lowLine, "hostname ") ||
+			strings.HasPrefix(lowLine, "port ") ||
+			strings.HasPrefix(lowLine, "user ") {
+			// Skip old line, we'll add new one at end of block
+			continue
+		}
+		result = append(result, line)
+	}
+
+	// Write back
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+
+	// Now append new directives if they differ
+	if inBlock {
+		appendDirectives(origAlias, newAlias, hostName, port, user)
+	}
+}
+
+func appendDirectives(origAlias, newAlias, hostName, port, user string) {
+	path := userConfig.configPath
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+
+	// Find the host block and insert directives inside it
+	alias := origAlias
+	if newAlias != origAlias {
+		alias = newAlias
+	}
+
+	var result []string
+	inserted := false
+	inBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lowTrim, "host ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == alias {
+				inBlock = true
+				result = append(result, line)
+				continue
+			}
+			if inBlock {
+				inBlock = false
+			}
+		}
+		if !inBlock {
+			result = append(result, line)
+			continue
+		}
+		result = append(result, line)
+	}
+	// Insert directives after the Host line
+	insertIdx := -1
+	for i, line := range result {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+		if strings.HasPrefix(lowTrim, "host ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == alias {
+				insertIdx = i + 1
+				break
+			}
+		}
+	}
+
+	if insertIdx >= 0 {
+		// Find where block ends (next Host or end of file)
+		endIdx := len(result)
+		for i := insertIdx; i < len(result); i++ {
+			trimmed := strings.TrimSpace(result[i])
+			lowTrim := strings.ToLower(trimmed)
+			if strings.HasPrefix(lowTrim, "host ") && !strings.HasPrefix(lowTrim, "hostname ") {
+				endIdx = i
+				break
+			}
+		}
+
+		// Remove old directives within the block
+		var cleaned []string
+		cleaned = append(cleaned, result[:insertIdx]...)
+		for i := insertIdx; i < endIdx; i++ {
+			trimmed := strings.TrimSpace(result[i])
+			lowTrim := strings.ToLower(trimmed)
+			if strings.HasPrefix(lowTrim, "hostname ") ||
+				strings.HasPrefix(lowTrim, "port ") ||
+				strings.HasPrefix(lowTrim, "user ") {
+				continue
+			}
+			cleaned = append(cleaned, result[i])
+		}
+		cleaned = append(cleaned, result[endIdx:]...)
+		result = cleaned
+
+		// Find new insert position
+		newInsertIdx := -1
+		for i, line := range result {
+			trimmed := strings.TrimSpace(line)
+			lowTrim := strings.ToLower(trimmed)
+			if strings.HasPrefix(lowTrim, "host ") {
+				fields := strings.Fields(trimmed)
+				if len(fields) >= 2 && fields[1] == alias {
+					newInsertIdx = i + 1
+					break
+				}
+			}
+		}
+
+		if newInsertIdx >= 0 && !inserted {
+			var withDirectives []string
+			withDirectives = append(withDirectives, result[:newInsertIdx]...)
+			if hostName != "" && hostName != alias {
+				withDirectives = append(withDirectives, "    HostName "+hostName)
+			}
+			if port != "" && port != "22" {
+				withDirectives = append(withDirectives, "    Port "+port)
+			}
+			if user != "" {
+				withDirectives = append(withDirectives, "    User "+user)
+			}
+			withDirectives = append(withDirectives, result[newInsertIdx:]...)
+			result = withDirectives
+			inserted = true
+		}
+	}
+
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+}
+
+func updatePasswordConfig(alias, password string) {
+	path := userConfig.exConfigPath
+	if path == "" {
+		return
+	}
+	data, _ := os.ReadFile(path)
+	lines := strings.Split(string(data), "\n")
+
+	var result []string
+	found := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+
+		// Check for Password <alias> = ...
+		if strings.HasPrefix(lowTrim, "password ") {
+			parts := strings.SplitN(trimmed, " ", 3)
+			if len(parts) >= 2 && parts[1] == alias {
+				if password == "" {
+					continue // remove line
+				}
+				found = true
+				result = append(result, "Password "+alias+" = "+password)
+				continue
+			}
+		}
+		// Check for encPassword <alias> = ... (skip encrypted entries, we'll handle)
+		if strings.HasPrefix(lowTrim, "encpassword ") {
+			parts := strings.SplitN(trimmed, " ", 3)
+			if len(parts) >= 2 && parts[1] == alias {
+				if password == "" {
+					continue
+				}
+				// Replace encPassword with plaintext
+				found = true
+				result = append(result, "Password "+alias+" = "+password)
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+
+	if !found && password != "" {
+		result = append(result, "Password "+alias+" = "+password)
+	}
+
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+
+	// Reset cache so next getExConfig reads fresh data
+	userConfig.exConfig = nil
+	userConfig.loadExConfig = sync.Once{}
+}
+
+func (m *hostModel) handleDeleteConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	switch s {
+	case "enter":
+		if m.deleteIdx >= 0 && m.deleteIdx < len(m.hosts) {
+			alias := m.hosts[m.deleteIdx].Alias
+			// Remove from in-memory lists
+			m.hosts = append(m.hosts[:m.deleteIdx], m.hosts[m.deleteIdx+1:]...)
+			// Also remove from filtered
+			for i := 0; i < len(m.filtered); i++ {
+				if m.filtered[i].Alias == alias {
+					m.filtered = append(m.filtered[:i], m.filtered[i+1:]...)
+					break
+				}
+			}
+			m.clampCursor()
+			// Reset deleteIdx so View won't access stale index
+			m.deleteIdx = -1
+			// Update config file for persistence
+			removeHostFromConfig(alias)
+		}
+		m.deleteAsk = false
+		return m, nil
+	case "esc", "q", "n":
+		m.deleteAsk = false
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func removeHostFromConfig(alias string) {
+	path := userConfig.configPath
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	var result []string
+	skip := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+		if strings.HasPrefix(lowTrim, "host ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[1] == alias {
+				skip = true
+				continue
+			}
+		}
+		if skip {
+			if trimmed == "" || strings.HasPrefix(lowTrim, "host ") {
+				skip = false
+				if trimmed != "" {
+					result = append(result, line)
+				}
+				continue
+			}
+			continue
+		}
+		result = append(result, line)
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+}
+
+// --- Host metadata (LastLogin, etc.) ---
+
+func metaDefaultPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".tssh_meta")
+}
+
+func metaLoadAll() map[string]map[string]string {
+	path := metaDefaultPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var result map[string]map[string]string
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
+	return result
+}
+
+func metaSaveAll(meta map[string]map[string]string) {
+	path := metaDefaultPath()
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0600)
+}
+
+func metaUpdateLastLogin(alias string) {
+	meta := metaLoadAll()
+	if meta == nil {
+		meta = make(map[string]map[string]string)
+	}
+	entry, ok := meta[alias]
+	if !ok {
+		entry = make(map[string]string)
+		meta[alias] = entry
+	}
+	entry["last_login"] = time.Now().Format("2006-01-02 15:04")
+	metaSaveAll(meta)
+}
+
+func (m *hostModel) loadMetaIntoHosts() {
+	meta := metaLoadAll()
+	if meta == nil {
+		return
+	}
+	for _, h := range m.hosts {
+		if entry, ok := meta[h.Alias]; ok {
+			if ll, ok := entry["last_login"]; ok {
+				h.LastLogin = ll
+			}
+		}
 	}
 }
 

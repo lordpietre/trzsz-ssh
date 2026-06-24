@@ -129,7 +129,10 @@ func (m *menuModel) View() tea.View {
 		if w < m.screenWidth {
 			s += strings.Repeat(" ", m.screenWidth-w)
 		}
-		return m.backgroundStyle.Render(s)
+		const resetSeq = "\x1b[0m"
+		const reApply = "\x1b[0m\x1b[47m\x1b[30m"
+		s = strings.ReplaceAll(s, resetSeq, reApply)
+		return "\x1b[47m\x1b[30m" + s + resetSeq
 	}
 
 	// top border

@@ -68,6 +68,8 @@ type sshHost struct {
 	RemoteCommand string
 	GroupLabels   string
 	Selected      bool `json:"-"`
+	LastLogin     string
+	System        bool
 }
 
 type tsshConfig struct {
@@ -585,10 +587,10 @@ func getAllHosts() []*sshHost {
 		userConfig.doLoadConfig()
 		seen := make(map[string]bool)
 		if userConfig.config != nil {
-			userConfig.allHosts = append(userConfig.allHosts, recursiveGetHosts(userConfig.config.Hosts, seen)...)
+			userConfig.allHosts = append(userConfig.allHosts, recursiveGetHosts(userConfig.config.Hosts, seen, false)...)
 		}
 		if userConfig.sysConfig != nil {
-			userConfig.allHosts = append(userConfig.allHosts, recursiveGetHosts(userConfig.sysConfig.Hosts, seen)...)
+			userConfig.allHosts = append(userConfig.allHosts, recursiveGetHosts(userConfig.sysConfig.Hosts, seen, true)...)
 		}
 		addAfterLoginFunc(func() { userConfig.allHosts = nil; userConfig.wildcardPatterns = nil })
 	})
@@ -597,19 +599,26 @@ func getAllHosts() []*sshHost {
 }
 
 // recursiveGetHosts recursive get hosts (contains include file's hosts)
-func recursiveGetHosts(cfgHosts []*ssh_config.Host, seen map[string]bool) []*sshHost {
+func recursiveGetHosts(cfgHosts []*ssh_config.Host, seen map[string]bool, system bool) []*sshHost {
 	var hosts []*sshHost
 	for _, host := range cfgHosts {
 		for _, node := range host.Nodes {
 			if include, ok := node.(*ssh_config.Include); ok && include != nil {
 				for _, config := range include.GetFiles() {
 					if config != nil {
-						hosts = append(hosts, recursiveGetHosts(config.Hosts, seen)...)
+						hosts = append(hosts, recursiveGetHosts(config.Hosts, seen, system)...)
 					}
 				}
 			}
 		}
+		before := len(hosts)
 		hosts = appendPromptHosts(hosts, seen, host)
+		// Mark newly added hosts as system
+		if system {
+			for i := before; i < len(hosts); i++ {
+				hosts[i].System = true
+			}
+		}
 	}
 	return hosts
 }

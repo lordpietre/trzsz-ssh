@@ -103,11 +103,13 @@ type sshArgs struct {
 	TsshdBinPath   string      `arg:"--tsshd-bin-path" placeholder:"path" help:"[tools] tsshd binary installation package path"`
 	UploadFile     multiStr    `arg:"--upload-file" placeholder:"path" help:"[tools] upload the local file to remote server"`
 	DownloadPath   string      `arg:"--download-path" placeholder:"path" help:"[tools] the local saving path for downloading"`
+	ConfigHelp     bool        `arg:"--help-config" help:"show ~/.tssh.conf configuration reference"`
 	originalDest   string
 }
 
 func (sshArgs) Description() string {
-	return "trzsz-ssh(tssh): Highly OpenSSH-compatible client with extended features.\n"
+	return "trzsz-ssh(tssh): Highly OpenSSH-compatible client with extended features.\n" +
+		"Run `tssh --help-config` for ~/.tssh.conf options reference.\n"
 }
 
 func (o *sshOption) UnmarshalText(b []byte) error {

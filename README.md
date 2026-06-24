@@ -81,6 +81,8 @@ DefaultDownloadPath = ~/Downloads
 CGO_ENABLED=0 go build -o ./bin/ ./cmd/tssh
 ```
 
-### Documentación completa
+### Documentación integrada
+
+Ejecuta `tssh --help-config` para ver la referencia completa de opciones de `~/.tssh.conf`.
 
 Para documentación detallada de todas las features (trzsz, zmodem, UDP, expect, scp/sftp, remember passwords, external password managers, Wayland, clipboard, themes, etc.), visita [trzsz.github.io/tssh](https://trzsz.github.io/tssh) o lee [README.en.md](README.en.md).

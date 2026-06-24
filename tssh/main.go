@@ -268,6 +268,11 @@ func TsshMain(argv []string) int {
 		return printVersionDetailed()
 	}
 
+	if args.ConfigHelp {
+		printConfigHelp()
+		return 0
+	}
+
 	// debug log
 	if args.Debug {
 		enableDebugLogging = true

@@ -281,6 +281,72 @@ func showTsshConfig() {
 	}
 }
 
+func printConfigHelp() {
+	const configHelp = `Configuration options in ~/.tssh.conf (or $XDG_CONFIG_HOME/tssh/tssh.conf):
+
+  ConfigPath = ~/.ssh/config
+    Path to SSH configuration file.
+
+  ExConfigPath = ~/.ssh/password
+    Path to extended configuration (passwords, secrets).
+
+  UseOpenSSHConfig = yes
+    Use 'ssh -G' to evaluate OpenSSH config, including Match blocks.
+
+  DefaultServerAliveInterval = 30
+    Default ServerAliveInterval in seconds (0 to disable).
+
+  SetTerminalTitle = yes
+    Auto-set terminal title after login.
+
+  DragFileUploadCommand = trz -y
+    Global drag-and-drop upload command.
+
+  DefaultUploadPath = ~/Downloads
+    Default path for trz upload file dialog.
+
+  DefaultDownloadPath = ~/Downloads
+    Default download path for tsz downloads.
+
+  ProgressColorPair = B14FFF 00FFA3
+    Trzsz progress bar gradient colors (two hex colors, no #).
+
+  PromptThemeLayout = simple
+    TUI theme: tiny | simple | table.
+
+  PromptThemeColors = {"key": "color"}
+    Custom theme colors as JSON object.
+
+  PromptPageSize = 10
+    Number of records per page in TUI.
+
+  PromptDefaultMode = search
+    Default TUI mode: search | normal.
+
+  PromptDetailItems = Alias Host Port User GroupLabels ...
+    Space-separated list of detail fields shown in TUI.
+
+  PromptCursorIcon = 🧨
+    Custom cursor icon in TUI.
+
+  PromptSelectedIcon = 🍺
+    Custom selected icon in TUI.
+
+  Language = english
+    Interface language: english | chinese.
+
+  Example:
+    PromptThemeLayout = simple
+    PromptDefaultMode = search
+    PromptPageSize = 10
+    DefaultServerAliveInterval = 30
+    SetTerminalTitle = yes
+    DragFileUploadCommand = trz -y
+    DefaultDownloadPath = ~/Downloads
+`
+	fmt.Fprint(os.Stdout, configHelp)
+}
+
 func initUserConfig(configFile string) (err error) {
 	userConfig = &tsshConfig{}
 	userHomeDir, err = os.UserHomeDir()

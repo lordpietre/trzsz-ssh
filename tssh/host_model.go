@@ -100,6 +100,21 @@ type newHostState struct {
 	err    string
 }
 
+type configField struct {
+	key   string // config key name (lowercase)
+	label string
+	value string
+	kind  string // "text", "number", "bool", "enum"
+}
+
+type configState struct {
+	active  bool
+	fields  []configField
+	cursor  int
+	saved   bool
+	err     string
+}
+
 type hostModel struct {
 	hosts              []*sshHost
 	filtered           []*sshHost
@@ -119,6 +134,7 @@ type hostModel struct {
 	tunnel             tunnelState
 	edit               editState
 	newHost            newHostState
+	config             configState
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -183,6 +199,14 @@ func (m *hostModel) getActions() []actionItem {
 			return m, nil
 		}})
 	}
+	actions = append(actions, actionItem{"Config", func() (tea.Model, tea.Cmd) {
+		m.config.active = true
+		m.config.cursor = 0
+		m.config.saved = false
+		m.config.err = ""
+		m.config.fields = buildConfigFields()
+		return m, nil
+	}})
 	actions = append(actions, actionItem{"Quit", func() (tea.Model, tea.Cmd) {
 		m.done = true
 		m.result = hostChoiceMsg{quit: true}
@@ -420,6 +444,9 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.edit.active {
 		return m.handleEdit(msg)
+	}
+	if m.config.active {
+		return m.handleConfig(msg)
 	}
 	if m.deleteAsk {
 		return m.handleDeleteConfirm(msg)
@@ -1001,6 +1028,8 @@ func (m *hostModel) View() tea.View {
 		m.renderEditView(&b, availableHeight+detailLines+2)
 	} else if m.newHost.active {
 		m.renderNewHost(&b, availableHeight+detailLines+2)
+	} else if m.config.active {
+		m.renderConfigView(&b, availableHeight+detailLines+2)
 	} else if m.deleteAsk {
 		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
 	} else if m.tunnel.active {
@@ -1052,7 +1081,7 @@ func (m *hostModel) View() tea.View {
 		}
 	}
 
-	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.deleteAsk {
+	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.config.active && !m.deleteAsk {
 		// --- separator ---
 		b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
@@ -1078,6 +1107,12 @@ func (m *hostModel) View() tea.View {
 		statusStr = "  Editing " + m.edit.fields[0].value + "  "
 	} else if m.newHost.active {
 		statusStr = "  Adding new host  "
+	} else if m.config.active {
+		if m.config.saved {
+			statusStr = "  Config saved — restart to apply  "
+		} else {
+			statusStr = "  Config  "
+		}
 	} else if m.deleteAsk && m.deleteIdx >= 0 && m.deleteIdx < len(m.hosts) {
 		statusStr = "  Delete " + m.hosts[m.deleteIdx].Alias + "?  "
 	} else if m.tunnel.active {
@@ -2041,6 +2076,203 @@ func buildEditFields(alias string) []editField {
 		{"Port", port, "Port", "text"},
 		{"User", user, "User", "text"},
 		{"Password", pw, "Password", "password"},
+	}
+}
+
+func buildConfigFields() []configField {
+	alive := fmt.Sprintf("%d", userConfig.defaultServerAliveInterval)
+	theme := userConfig.promptThemeLayout
+	if theme == "" {
+		theme = "simple"
+	}
+	mode := userConfig.promptDefaultMode
+	if mode == "" {
+		mode = "normal"
+	}
+	pageSize := fmt.Sprintf("%d", userConfig.promptPageSize)
+	if pageSize == "0" {
+		pageSize = "10"
+	}
+	title := userConfig.setTerminalTitle
+	if title == "" {
+		title = "no"
+	}
+	uploadCmd := userConfig.dragFileUploadCommand
+	downloadPath := userConfig.defaultDownloadPath
+	lang := userConfig.language
+	if lang == "" {
+		lang = "english"
+	}
+	return []configField{
+		{"defaultserveraliveinterval", "ServerAliveInterval (0=off)", alive, "number"},
+		{"setterminaltitle", "Set terminal title", title, "bool"},
+		{"dragfileuploadcommand", "Drag-file upload command", uploadCmd, "text"},
+		{"defaultdownloadpath", "Default download path", downloadPath, "text"},
+		{"promptthemelayout", "Theme layout (tiny/simple/table)", theme, "text"},
+		{"promptdefaultmode", "Default mode (search/normal)", mode, "text"},
+		{"promptpagesize", "Page size", pageSize, "number"},
+		{"language", "Language (english/chinese)", lang, "text"},
+	}
+}
+
+func (m *hostModel) handleConfig(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.config.saved {
+		if msg.String() == "enter" || msg.String() == "esc" {
+			m.config.active = false
+			m.config.saved = false
+		}
+		return m, nil
+	}
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "up", "k", "shift+tab":
+		if m.config.cursor > 0 {
+			m.config.cursor--
+		}
+		return m, nil
+	case "down", "j", "tab":
+		if m.config.cursor < len(m.config.fields)-1 {
+			m.config.cursor++
+		}
+		return m, nil
+	case "enter":
+		return m.saveConfig()
+	case "esc":
+		m.config.active = false
+		m.config.err = ""
+		return m, nil
+	case "backspace":
+		f := &m.config.fields[m.config.cursor]
+		if len(f.value) > 0 {
+			f.value = f.value[:len(f.value)-1]
+		}
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		f := &m.config.fields[m.config.cursor]
+		if f.kind == "number" {
+			for _, r := range txt {
+				if r >= '0' && r <= '9' {
+					f.value += string(r)
+				}
+			}
+		} else {
+			f.value += txt
+		}
+		return m, nil
+	}
+}
+
+func (m *hostModel) saveConfig() (tea.Model, tea.Cmd) {
+	if err := m.writeTsshConfig(); err != nil {
+		m.config.err = err.Error()
+		return m, nil
+	}
+	m.config.saved = true
+	m.config.err = ""
+	return m, nil
+}
+
+func getTsshConfWritePath() string {
+	return getTsshConfigPath(true)
+}
+
+func (m *hostModel) writeTsshConfig() error {
+	path := getTsshConfWritePath()
+	if path == "" {
+		return fmt.Errorf("cannot determine config path")
+	}
+
+	var lines []string
+	for _, f := range m.config.fields {
+		val := f.value
+		if val == "" && f.key == "defaultserveraliveinterval" {
+			val = "0"
+		}
+		if val != "" {
+			switch f.key {
+			case "defaultserveraliveinterval":
+				lines = append(lines, fmt.Sprintf("DefaultServerAliveInterval = %s", val))
+			case "setterminaltitle":
+				lines = append(lines, fmt.Sprintf("SetTerminalTitle = %s", val))
+			case "dragfileuploadcommand":
+				lines = append(lines, fmt.Sprintf("DragFileUploadCommand = %s", val))
+			case "defaultdownloadpath":
+				lines = append(lines, fmt.Sprintf("DefaultDownloadPath = %s", val))
+			case "promptthemelayout":
+				lines = append(lines, fmt.Sprintf("PromptThemeLayout = %s", val))
+			case "promptdefaultmode":
+				lines = append(lines, fmt.Sprintf("PromptDefaultMode = %s", val))
+			case "promptpagesize":
+				lines = append(lines, fmt.Sprintf("PromptPageSize = %s", val))
+			case "language":
+				lines = append(lines, fmt.Sprintf("Language = %s", val))
+			}
+		}
+	}
+
+	data := strings.Join(lines, "\n") + "\n"
+	return os.WriteFile(path, []byte(data), 0600)
+}
+
+func (m *hostModel) renderConfigView(b *strings.Builder, maxLines int) {
+	if m.config.saved {
+		title := "  ── Config Saved ──"
+		b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine("  Configuration saved to "+getTsshConfWritePath()) + "\n")
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠  Please close and restart tssh for changes")) + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("     to take effect.")) + "\n")
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.helpStyle.Render("  Enter or Esc to go back")) + "\n")
+		for i := 7; i < maxLines; i++ {
+			b.WriteString(m.bgLine("") + "\n")
+		}
+		return
+	}
+
+	title := "  ── Config ──"
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	for i, f := range m.config.fields {
+		if i >= maxLines-4 {
+			break
+		}
+		display := f.value
+		if display == "" {
+			display = "(empty)"
+		}
+		line := fmt.Sprintf("  %s: %s", f.label, display)
+		if i == m.config.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line+"▌")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   " + line) + "\n")
+		}
+	}
+
+	if m.config.err != "" {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠ " + m.config.err)) + "\n")
+	}
+
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Tab navigate  Enter save  Esc cancel")) + "\n")
+
+	used := len(m.config.fields) + 3
+	if m.config.err != "" {
+		used += 2
+	}
+	for i := used; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
 	}
 }
 

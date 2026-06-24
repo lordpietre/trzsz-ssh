@@ -385,7 +385,9 @@ func initUserConfig(configFile string) (err error) {
 func loadConfig(path string, system bool) *ssh_config.Config {
 	file, err := os.Open(path)
 	if err != nil {
-		warning("open config [%s] failed: %v", path, err)
+		if !os.IsNotExist(err) {
+			warning("open config [%s] failed: %v", path, err)
+		}
 		return nil
 	}
 	defer func() { _ = file.Close() }()

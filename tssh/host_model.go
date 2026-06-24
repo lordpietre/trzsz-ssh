@@ -94,6 +94,25 @@ type editState struct {
 	hostIdx int
 }
 
+type groupPickerState struct {
+	active bool
+	cursor int
+	mode   string   // "select" or "new"
+	groups []string
+	input  string
+}
+
+type groupsState struct {
+	active       bool
+	view         string // "menu", "new_name", "new_hosts", "edit_group", "edit_hosts"
+	cursor       int
+	input        string
+	err          string
+	editingGroup string
+	groupHosts   []*sshHost
+	groupSele    []bool
+}
+
 type newHostField struct {
 	label string
 	value string
@@ -157,6 +176,8 @@ type hostModel struct {
 	newHost            newHostState
 	config             configState
 	download           downloadState
+	groups             groupsState
+	groupPicker        groupPickerState
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -185,6 +206,7 @@ func (m *hostModel) getActions() []actionItem {
 				{"Port", "22", "text"},
 				{"User", "", "text"},
 				{"Password", "", "password"},
+				{"Group", "", "group"},
 			}
 			return m, nil
 		}},
@@ -194,10 +216,13 @@ func (m *hostModel) getActions() []actionItem {
 			m.actionCursor = -1
 			return m, nil
 		}},
-		{"Select", func() (tea.Model, tea.Cmd) {
-			if m.termMgr != nil && m.cursor >= 0 && m.cursor < len(m.filtered) {
-				m.filtered[m.cursor].Selected = !m.filtered[m.cursor].Selected
-			}
+		{"Groups", func() (tea.Model, tea.Cmd) {
+			m.groups.active = true
+			m.groups.view = "menu"
+			m.groups.cursor = 0
+			m.groups.input = ""
+			m.groups.err = ""
+			m.groups.editingGroup = ""
 			return m, nil
 		}},
 	}
@@ -213,13 +238,6 @@ func (m *hostModel) getActions() []actionItem {
 				return m.confirmBatch(openTermPane)
 			}},
 		)
-	} else {
-		actions = append(actions, actionItem{"Enter", func() (tea.Model, tea.Cmd) {
-			if len(m.filtered) > 0 {
-				return m.confirm(m.cursor)
-			}
-			return m, nil
-		}})
 	}
 	actions = append(actions, actionItem{"Config", func() (tea.Model, tea.Cmd) {
 		m.config.active = true
@@ -262,6 +280,19 @@ func (m *hostModel) getContextItems() []contextItem {
 			m.tunnel.view = "menu"
 			m.tunnel.alias = alias
 			m.tunnel.tunnels = tunnelLoadConfig(m.tunnel.tunnelConfigPath, alias)
+			return m, nil
+		}},
+		{"Group", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			if alias == "" {
+				return m, nil
+			}
+			m.groups.active = true
+			m.groups.view = "menu"
+			m.groups.cursor = 0
+			m.groups.input = ""
+			m.groups.err = ""
+			m.groups.editingGroup = ""
 			return m, nil
 		}},
 		{"Download", func() (tea.Model, tea.Cmd) {
@@ -418,7 +449,29 @@ func (m *hostModel) applyFilter() {
 			filtered = append(filtered, h)
 		}
 	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		gi, gj := groupSortKey(filtered[i]), groupSortKey(filtered[j])
+		if gi != gj {
+			// "~" sorts after letters so ungrouped hosts appear last
+			if gi == "~" {
+				return false
+			}
+			if gj == "~" {
+				return true
+			}
+			return gi < gj
+		}
+		return filtered[i].Alias < filtered[j].Alias
+	})
 	m.filtered = filtered
+}
+
+func groupSortKey(h *sshHost) string {
+	if h.GroupLabels == "" {
+		return "~"
+	}
+	first := strings.Fields(h.GroupLabels)[0]
+	return strings.ToLower(first)
 }
 
 func (m *hostModel) Init() tea.Cmd {
@@ -487,6 +540,12 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.download.active {
 		return m.handleDownload(msg)
+	}
+	if m.groupPicker.active {
+		return m.handleGroupPicker(msg)
+	}
+	if m.groups.active {
+		return m.handleGroups(msg)
 	}
 	if m.deleteAsk {
 		return m.handleDeleteConfirm(msg)
@@ -684,22 +743,38 @@ func (m *hostModel) handleTunnelManualForm(msg tea.KeyPressMsg) (tea.Model, tea.
 
 func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
+	totalItems := len(m.tunnel.scanPorts) + len(m.tunnel.dockerContainers)
 	switch s {
 	case "up", "k":
 		if m.tunnel.scanCursor > 0 {
 			m.tunnel.scanCursor--
 		}
 	case "down", "j":
-		if m.tunnel.scanCursor < len(m.tunnel.scanPorts)-1 {
+		if m.tunnel.scanCursor < totalItems-1 {
 			m.tunnel.scanCursor++
 		}
 	case "enter":
-		if len(m.tunnel.scanPorts) > 0 {
-			m.tunnel.askLocalRemote = m.tunnel.scanPorts[m.tunnel.scanCursor].Port
-			m.tunnel.view = "form_ask_local"
-			m.tunnel.formField = 0
-			m.tunnel.manualLocal = ""
+		if totalItems == 0 {
+			break
 		}
+		if m.tunnel.scanCursor < len(m.tunnel.scanPorts) {
+			m.tunnel.askLocalRemote = m.tunnel.scanPorts[m.tunnel.scanCursor].Port
+		} else {
+			dockerIdx := m.tunnel.scanCursor - len(m.tunnel.scanPorts)
+			if dockerIdx < len(m.tunnel.dockerContainers) {
+				ports := parseDockerHostPorts(m.tunnel.dockerContainers[dockerIdx].Ports)
+				if len(ports) > 0 {
+					m.tunnel.askLocalRemote = ports[0]
+				} else {
+					break
+				}
+			} else {
+				break
+			}
+		}
+		m.tunnel.view = "form_ask_local"
+		m.tunnel.formField = 0
+		m.tunnel.manualLocal = ""
 	case "esc":
 		m.tunnel.view = "menu"
 	case "ctrl+c", "ctrl+q":
@@ -708,6 +783,26 @@ func (m *hostModel) handleTunnelAutoResults(msg tea.KeyPressMsg) (tea.Model, tea
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func parseDockerHostPorts(portsStr string) []int {
+	var hostPorts []int
+	for _, part := range strings.Split(portsStr, ",") {
+		part = strings.TrimSpace(part)
+		idx := strings.Index(part, "->")
+		if idx < 0 {
+			continue
+		}
+		hostPart := strings.TrimSpace(part[:idx])
+		colonIdx := strings.LastIndex(hostPart, ":")
+		if colonIdx >= 0 {
+			portStr := hostPart[colonIdx+1:]
+			if p, err := strconv.Atoi(portStr); err == nil {
+				hostPorts = append(hostPorts, p)
+			}
+		}
+	}
+	return hostPorts
 }
 
 func (m *hostModel) handleTunnelAskLocal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1072,6 +1167,8 @@ func (m *hostModel) View() tea.View {
 		m.renderConfigView(&b, availableHeight+detailLines+2)
 	} else if m.download.active {
 		m.renderDownloadView(&b, availableHeight+detailLines+2)
+	} else if m.groups.active {
+		m.renderGroupsView(&b, availableHeight+detailLines+2)
 	} else if m.deleteAsk {
 		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
 	} else if m.tunnel.active {
@@ -1099,9 +1196,41 @@ func (m *hostModel) View() tea.View {
 		if listHeight < 1 {
 			listHeight = 1
 		}
-		scrollOffset = 0
-		if m.cursor >= listHeight {
-			scrollOffset = m.cursor - listHeight + 1
+
+		// Build display positions: interleave group headers between hosts
+		type dispPos struct {
+			isHeader bool
+			hostIdx  int
+			label    string
+		}
+		var display []dispPos
+		lastGroup := ""
+		for hi, h := range m.filtered {
+			g := groupSortKey(h)
+			if g == "~" {
+				g = ""
+			}
+			if g != "" && g != lastGroup {
+				display = append(display, dispPos{isHeader: true, label: g})
+			}
+			lastGroup = g
+			display = append(display, dispPos{hostIdx: hi})
+		}
+
+		// Find cursor's display row
+		cursorDisplay := 0
+		for di, d := range display {
+			if !d.isHeader && d.hostIdx == m.cursor {
+				cursorDisplay = di
+				break
+			}
+		}
+
+		// Compute scroll offset in display rows
+		if cursorDisplay >= listHeight {
+			scrollOffset = cursorDisplay - listHeight + 1
+		} else {
+			scrollOffset = 0
 		}
 
 		// Column header
@@ -1112,18 +1241,24 @@ func (m *hostModel) View() tea.View {
 		b.WriteString(m.bgLine(header) + "\n")
 
 		for i := 0; i < listHeight; i++ {
-			idx := scrollOffset + i
-			if idx < len(m.filtered) {
-				h := m.filtered[idx]
-				isActive := idx == m.cursor
-				m.renderHost(&b, h, isActive)
+			dIdx := scrollOffset + i
+			if dIdx < len(display) {
+				d := display[dIdx]
+				if d.isHeader {
+					headerLine := m.labelStyle.Render("  ── " + d.label + " ──")
+					b.WriteString(m.bgLine(headerLine) + "\n")
+				} else {
+					h := m.filtered[d.hostIdx]
+					isActive := d.hostIdx == m.cursor
+					m.renderHost(&b, h, isActive)
+				}
 			} else {
 				b.WriteString(m.bgLine("") + "\n")
 			}
 		}
 	}
 
-	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.config.active && !m.download.active && !m.deleteAsk {
+	if !m.tunnel.active && !m.edit.active && !m.newHost.active && !m.config.active && !m.download.active && !m.deleteAsk && !m.groups.active {
 		// --- separator ---
 		b.WriteString(m.bgLine("├"+strings.Repeat("─", m.width-2)+"┤") + "\n")
 
@@ -1149,6 +1284,8 @@ func (m *hostModel) View() tea.View {
 		statusStr = "  Editing " + m.edit.fields[0].value + "  "
 	} else if m.newHost.active {
 		statusStr = "  Adding new host  "
+	} else if m.groups.active {
+		statusStr = "  Groups  "
 	} else if m.download.active {
 		statusStr = "  Download from " + m.download.alias + "  "
 	} else if m.config.active {
@@ -1577,6 +1714,8 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 
 	totalPorts := len(m.tunnel.scanPorts)
 	totalDocker := len(m.tunnel.dockerContainers)
+	totalItems := totalPorts + totalDocker
+	dockerOffset := totalPorts
 
 	if totalPorts == 0 && totalDocker == 0 {
 		b.WriteString(m.bgLine("  No open ports or containers found.") + "\n")
@@ -1585,21 +1724,21 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 	showPorts := totalPorts
 	showDocker := totalDocker
 	available := maxLines - 3 // leave room for help line
-	if totalPorts+totalDocker > available && totalDocker > 0 {
+	if totalItems > available && totalDocker > 0 {
 		// Try to show at least some of both
-		portLines := available * totalPorts / (totalPorts + totalDocker)
+		portLines := available * totalPorts / totalItems
 		if portLines < 1 {
 			portLines = 1
 		}
 		dockerLines := available - portLines - 1 // 1 for docker header
 		if dockerLines < 1 {
-			showDocker = dockerLines
-			showPorts = available - 1
+			showDocker = 0
+			showPorts = available
 		} else {
 			showPorts = portLines
 			showDocker = dockerLines
 		}
-	} else if totalPorts+totalDocker > available {
+	} else if totalItems > available {
 		showPorts = available
 		showDocker = 0
 	}
@@ -1627,7 +1766,12 @@ func (m *hostModel) renderTunnelAutoResults(b *strings.Builder, maxLines int) {
 		for i := 0; i < totalDocker && i < showDocker; i++ {
 			c := m.tunnel.dockerContainers[i]
 			line := fmt.Sprintf("  · %s   %s", c.Name, c.Ports)
-			b.WriteString(m.bgLine(m.inactiveStyle.Render(line)) + "\n")
+			cursorIdx := dockerOffset + i
+			if cursorIdx == m.tunnel.scanCursor {
+				b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line)) + "\n")
+			} else {
+				b.WriteString(m.bgLine(m.inactiveStyle.Render("   "+line)) + "\n")
+			}
 			rendered++
 		}
 	}
@@ -1670,7 +1814,7 @@ func (m *hostModel) renderEditView(b *strings.Builder, maxLines int) {
 		display := f.value
 		if f.kind == "password" {
 			if display != "" {
-				display = "••••••••"
+				display = strings.Repeat("•", len([]rune(display)))
 			}
 		}
 		line := label + display
@@ -1679,6 +1823,10 @@ func (m *hostModel) renderEditView(b *strings.Builder, maxLines int) {
 		} else {
 			b.WriteString(m.bgLine("   " + line) + "\n")
 		}
+	}
+	if m.groupPicker.active {
+		m.renderGroupPicker(b, maxLines-len(m.edit.fields)-3)
+		return
 	}
 	b.WriteString(m.bgLine("") + "\n")
 	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Tab navigate  Enter save  Esc cancel")) + "\n")
@@ -1699,7 +1847,7 @@ func (m *hostModel) renderNewHost(b *strings.Builder, maxLines int) {
 		label := fmt.Sprintf("  %s: ", f.label)
 		display := f.value
 		if f.kind == "password" && display != "" {
-			display = "••••••••"
+			display = strings.Repeat("•", len([]rune(display)))
 		}
 		line := label + display
 		if i == m.newHost.cursor {
@@ -1709,6 +1857,10 @@ func (m *hostModel) renderNewHost(b *strings.Builder, maxLines int) {
 		}
 	}
 
+	if m.groupPicker.active {
+		m.renderGroupPicker(b, maxLines-len(m.newHost.fields)-3)
+		return
+	}
 	if m.newHost.err != "" {
 		b.WriteString(m.bgLine("") + "\n")
 		b.WriteString(m.bgLine(m.activeStyle.Render("  ⚠ " + m.newHost.err)) + "\n")
@@ -1741,6 +1893,112 @@ func (m *hostModel) renderDeleteAsk(b *strings.Builder, maxLines int) {
 	b.WriteString(m.bgLine("") + "\n")
 	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to confirm  Esc to cancel")) + "\n")
 	for i := 8; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderGroupsView(b *strings.Builder, maxLines int) {
+	switch m.groups.view {
+	case "menu":
+		m.renderGroupsMenu(b, maxLines)
+	case "new_name":
+		m.renderGroupsNewName(b, maxLines)
+	case "new_hosts":
+		m.renderGroupsHostList(b, maxLines, true)
+	case "edit_group":
+		m.renderGroupsEditGroup(b, maxLines)
+	case "edit_hosts":
+		m.renderGroupsHostList(b, maxLines, false)
+	}
+}
+
+func (m *hostModel) renderGroupsMenu(b *strings.Builder, maxLines int) {
+	b.WriteString(m.bgLine(m.activeStyle.Render("  ── Groups ──")) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	items := []string{"New", "Edit"}
+	for i, item := range items {
+		if i == m.groups.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█ ["+item+"]")) + "\n")
+		} else {
+			b.WriteString(m.bgLine("   ["+item+"]") + "\n")
+		}
+	}
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Navigate  Enter select  Esc back")) + "\n")
+	for i := 5; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderGroupsNewName(b *strings.Builder, maxLines int) {
+	b.WriteString(m.bgLine(m.activeStyle.Render("  ── New Group ──")) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine("  Group name:") + "\n")
+	name := m.groups.input
+	b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+name+"▌")) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  Enter to confirm  Esc back")) + "\n")
+	for i := 6; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderGroupsEditGroup(b *strings.Builder, maxLines int) {
+	b.WriteString(m.bgLine(m.activeStyle.Render("  ── Select Group ──")) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+	groups := m.groups.groupHosts
+	if len(groups) == 0 {
+		b.WriteString(m.bgLine("  No groups defined yet.") + "\n")
+	} else {
+		for i, h := range groups {
+			line := "  " + h.Alias
+			if i == m.groups.cursor {
+				b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+line)) + "\n")
+			} else {
+				b.WriteString(m.bgLine("   "+line) + "\n")
+			}
+		}
+	}
+	b.WriteString(m.bgLine("") + "\n")
+	b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Navigate  Enter select  Esc back")) + "\n")
+	for i := len(groups) + 4; i < maxLines; i++ {
+		b.WriteString(m.bgLine("") + "\n")
+	}
+}
+
+func (m *hostModel) renderGroupsHostList(b *strings.Builder, maxLines int, isNew bool) {
+	title := "  ── Select Hosts ──"
+	if !isNew {
+		title = "  ── " + m.groups.editingGroup + " ──"
+	}
+	b.WriteString(m.bgLine(m.activeStyle.Render(clipString(title, m.width-1))) + "\n")
+	b.WriteString(m.bgLine("") + "\n")
+
+	hosts := m.groups.groupHosts
+	sele := m.groups.groupSele
+	if len(hosts) == 0 {
+		b.WriteString(m.bgLine("  No hosts available.") + "\n")
+	} else {
+		for i, h := range hosts {
+			check := " "
+			if sele[i] {
+				check = "✓"
+			}
+			line := fmt.Sprintf(" [%s] %s", check, h.Alias)
+			if i == m.groups.cursor {
+				b.WriteString(m.bgLine(m.activeStyle.Render("▐█"+line)) + "\n")
+			} else {
+				b.WriteString(m.bgLine("  "+line) + "\n")
+			}
+		}
+	}
+	b.WriteString(m.bgLine("") + "\n")
+	if isNew {
+		b.WriteString(m.bgLine(m.helpStyle.Render("  Space toggle  Enter save  Esc back")) + "\n")
+	} else {
+		b.WriteString(m.bgLine(m.helpStyle.Render("  Space toggle removal  Enter confirm  Esc back")) + "\n")
+	}
+	for i := len(hosts) + 4; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 }
@@ -2114,12 +2372,14 @@ func tunnelStopProcess(entry *tunnelEntry) tea.Cmd {
 func buildEditFields(alias string) []editField {
 	host, port, user := resolveHostPortUser(alias)
 	pw := getExConfig(alias, "Password")
+	group := getGroupLabels(alias)
 	return []editField{
 		{"Alias", alias, "", "text"},
 		{"HostName", host, "HostName", "text"},
 		{"Port", port, "Port", "text"},
 		{"User", user, "User", "text"},
 		{"Password", pw, "Password", "password"},
+		{"Group", group, "", "group"},
 	}
 }
 
@@ -2426,6 +2686,10 @@ func (m *hostModel) handleEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
+		f := &m.edit.fields[m.edit.cursor]
+		if f.kind == "group" {
+			return m.activateGroupPicker("edit")
+		}
 		return m.saveEdit()
 	case "esc":
 		m.edit.active = false
@@ -2451,7 +2715,7 @@ func (m *hostModel) handleEdit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					f.value += string(r)
 				}
 			}
-		} else {
+		} else if f.kind != "group" {
 			f.value += txt
 		}
 		return m, nil
@@ -2471,6 +2735,10 @@ func (m *hostModel) handleNewHost(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.newHost.cursor++
 		}
 	case "enter":
+		f := &m.newHost.fields[m.newHost.cursor]
+		if f.kind == "group" {
+			return m.activateGroupPicker("newHost")
+		}
 		return m.saveNewHost()
 	case "esc":
 		m.newHost.active = false
@@ -2495,7 +2763,7 @@ func (m *hostModel) handleNewHost(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					f.value += string(r)
 				}
 			}
-		} else {
+		} else if f.kind != "group" {
 			f.value += txt
 		}
 	}
@@ -2512,6 +2780,12 @@ func (m *hostModel) saveNewHost() (tea.Model, tea.Cmd) {
 	port := fields[2].value
 	user := fields[3].value
 	password := fields[4].value
+	group := ""
+	for _, f := range fields {
+		if f.kind == "group" {
+			group = f.value
+		}
+	}
 
 	if alias == "" || hostName == "" || user == "" {
 		m.newHost.err = "Alias, HostName/IP, and User are required"
@@ -2535,15 +2809,25 @@ func (m *hostModel) saveNewHost() (tea.Model, tea.Cmd) {
 
 	writeNewHostConfig(alias, hostName, port, user, password)
 
+	// Save group
+	if group != "" {
+		updateGroupLabelsConfig(alias, group)
+	}
+
 	// Add to in-memory list
 	host := &sshHost{
-		Alias: alias,
-		Host:  hostName,
-		Port:  port,
-		User:  user,
+		Alias:       alias,
+		Host:        hostName,
+		Port:        port,
+		User:        user,
+		GroupLabels: group,
 	}
 	m.hosts = append(m.hosts, host)
 	m.filtered = append(m.filtered, host)
+
+	// Re-sort filtered to maintain group order
+	m.applyFilter()
+
 	m.newHost.active = false
 	m.newHost.err = ""
 	return m, nil
@@ -2578,6 +2862,12 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 	port := fields[2].value
 	user := fields[3].value
 	pw := fields[4].value
+	group := ""
+	for _, f := range fields {
+		if f.kind == "group" {
+			group = f.value
+		}
+	}
 
 	origAlias := ""
 	hostIdx := m.edit.hostIdx
@@ -2596,12 +2886,18 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 	// Update password in extended config
 	updatePasswordConfig(origAlias, pw)
 
+	// Update group in extended config
+	if group != getGroupLabels(origAlias) {
+		updateGroupLabelsConfig(origAlias, group)
+	}
+
 	// Fix filtered reference
 	if hostIdx >= 0 && hostIdx < len(m.hosts) {
 		m.hosts[hostIdx].Alias = newAlias
 		m.hosts[hostIdx].Host = hostName
 		m.hosts[hostIdx].Port = port
 		m.hosts[hostIdx].User = user
+		m.hosts[hostIdx].GroupLabels = group
 	}
 	// If alias changed, also update filtered entries
 	for i := range m.filtered {
@@ -2610,12 +2906,9 @@ func (m *hostModel) saveEdit() (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-	// If alias changed and we were on this host, update the reference
-	if m.cursor >= 0 && m.cursor < len(m.filtered) {
-		if m.filtered[m.cursor].Alias == origAlias {
-			// Fine, already updated
-		}
-	}
+
+	// Refresh filter to re-sort by group
+	m.applyFilter()
 
 	m.edit.active = false
 	return m, nil
@@ -2857,6 +3150,45 @@ func updatePasswordConfig(alias, password string) {
 	userConfig.loadExConfig = sync.Once{}
 }
 
+func updateGroupLabelsConfig(alias, group string) {
+	path := userConfig.exConfigPath
+	if path == "" {
+		return
+	}
+	data, _ := os.ReadFile(path)
+	lines := strings.Split(string(data), "\n")
+
+	var result []string
+	found := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lowTrim := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lowTrim, "grouplabels ") {
+			parts := strings.SplitN(trimmed, " ", 3)
+			if len(parts) >= 2 && parts[1] == alias {
+				if group == "" {
+					continue // remove line
+				}
+				found = true
+				result = append(result, "GroupLabels "+alias+" = "+group)
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+
+	if !found && group != "" {
+		result = append(result, "GroupLabels "+alias+" = "+group)
+	}
+
+	_ = os.WriteFile(path, []byte(strings.Join(result, "\n")), 0600)
+
+	// Reset cache so next getGroupLabels reads fresh data
+	userConfig.exConfig = nil
+	userConfig.loadExConfig = sync.Once{}
+}
+
 func (m *hostModel) handleDeleteConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	switch s {
@@ -2889,6 +3221,424 @@ func (m *hostModel) handleDeleteConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m *hostModel) handleGroups(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch m.groups.view {
+	case "menu":
+		return m.handleGroupsMenu(msg)
+	case "new_name":
+		return m.handleGroupsNewName(msg)
+	case "new_hosts":
+		return m.handleGroupsHostList(msg, true)
+	case "edit_group":
+		return m.handleGroupsEditGroup(msg)
+	case "edit_hosts":
+		return m.handleGroupsHostList(msg, false)
+	}
+	return m, nil
+}
+
+func (m *hostModel) handleGroupsMenu(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	items := []string{"New", "Edit"}
+	switch s {
+	case "up", "k":
+		if m.groups.cursor > 0 {
+			m.groups.cursor--
+		}
+	case "down", "j":
+		if m.groups.cursor < len(items)-1 {
+			m.groups.cursor++
+		}
+	case "enter":
+		switch m.groups.cursor {
+		case 0: // New
+			m.groups.view = "new_name"
+			m.groups.cursor = 0
+			m.groups.input = ""
+		case 1: // Edit
+			allGroups := collectAllGroups()
+			if len(allGroups) == 0 {
+				m.groups.err = "No groups defined"
+				return m, nil
+			}
+			m.groups.groupHosts = allGroups
+			m.groups.view = "edit_group"
+			m.groups.cursor = 0
+		}
+	case "esc":
+		m.groups.active = false
+		m.groups.input = ""
+		m.groups.err = ""
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *hostModel) handleGroupsNewName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+	switch s {
+	case "enter":
+		name := strings.TrimSpace(m.groups.input)
+		if name == "" {
+			m.groups.err = "Name cannot be empty"
+			return m, nil
+		}
+		// Build host list with all hosts (none pre-selected)
+		var hosts []*sshHost
+		for _, h := range m.hosts {
+			if !h.System {
+				hosts = append(hosts, h)
+			}
+		}
+		m.groups.input = name
+		m.groups.groupHosts = hosts
+		m.groups.groupSele = make([]bool, len(hosts))
+		m.groups.cursor = 0
+		m.groups.err = ""
+		m.groups.view = "new_hosts"
+	case "esc":
+		m.groups.view = "menu"
+		m.groups.cursor = 0
+		m.groups.input = ""
+		m.groups.err = ""
+	case "backspace":
+		if len(m.groups.input) > 0 {
+			m.groups.input = m.groups.input[:len(m.groups.input)-1]
+		}
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		m.groups.input += txt
+	}
+	return m, nil
+}
+
+func (m *hostModel) handleGroupsEditGroup(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	groups := m.groups.groupHosts
+	switch s {
+	case "up", "k":
+		if m.groups.cursor > 0 {
+			m.groups.cursor--
+		}
+	case "down", "j":
+		if m.groups.cursor < len(groups)-1 {
+			m.groups.cursor++
+		}
+	case "enter":
+		if len(groups) == 0 {
+			return m, nil
+		}
+		groupName := groups[m.groups.cursor].Alias
+		m.groups.editingGroup = groupName
+		// Find hosts in this group
+		var hosts []*sshHost
+		for _, h := range m.hosts {
+			if !h.System && hasGroup(h, groupName) {
+				hosts = append(hosts, h)
+			}
+		}
+		m.groups.groupHosts = hosts
+		m.groups.groupSele = make([]bool, len(hosts))
+		for i := range m.groups.groupSele {
+			m.groups.groupSele[i] = true // pre-selected (keep in group)
+		}
+		m.groups.cursor = 0
+		m.groups.err = ""
+		m.groups.view = "edit_hosts"
+	case "esc":
+		m.groups.view = "menu"
+		m.groups.cursor = 0
+		m.groups.input = ""
+		m.groups.err = ""
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *hostModel) handleGroupsHostList(msg tea.KeyPressMsg, isNew bool) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	hosts := m.groups.groupHosts
+	switch s {
+	case "up", "k":
+		if m.groups.cursor > 0 {
+			m.groups.cursor--
+		}
+	case "down", "j":
+		if m.groups.cursor < len(hosts)-1 {
+			m.groups.cursor++
+		}
+	case " ":
+		if m.groups.cursor >= 0 && m.groups.cursor < len(m.groups.groupSele) {
+			m.groups.groupSele[m.groups.cursor] = !m.groups.groupSele[m.groups.cursor]
+		}
+	case "enter":
+		return m, m.saveGroups(isNew)
+	case "esc":
+		if isNew {
+			m.groups.view = "new_name"
+		} else {
+			m.groups.view = "edit_group"
+			m.groups.cursor = 0
+			m.groups.groupHosts = collectAllGroups()
+		}
+		m.groups.err = ""
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *hostModel) saveGroups(isNew bool) tea.Cmd {
+	groupName := m.groups.input
+	if !isNew {
+		groupName = m.groups.editingGroup
+	}
+	hosts := m.groups.groupHosts
+	sele := m.groups.groupSele
+
+	for i, h := range hosts {
+		currentGroups := strings.Fields(h.GroupLabels)
+		hasGroupName := func() bool {
+			for _, g := range currentGroups {
+				if strings.EqualFold(g, groupName) {
+					return true
+				}
+			}
+			return false
+		}
+		if isNew {
+			// Add to group if selected
+			if sele[i] && !hasGroupName() {
+				currentGroups = append(currentGroups, groupName)
+			}
+		} else {
+			// Remove from group if deselected
+			if !sele[i] && hasGroupName() {
+				var keep []string
+				for _, g := range currentGroups {
+					if !strings.EqualFold(g, groupName) {
+						keep = append(keep, g)
+					}
+				}
+				currentGroups = keep
+			} else if sele[i] {
+				continue
+			} else {
+				continue
+			}
+		}
+		newLabels := strings.Join(currentGroups, " ")
+		updateGroupLabelsConfig(h.Alias, newLabels)
+		h.GroupLabels = newLabels
+	}
+
+	// Refresh
+	m.applyFilter()
+	m.groups.active = false
+	m.groups.input = ""
+	m.groups.err = ""
+	m.groups.editingGroup = ""
+	m.groups.groupHosts = nil
+	m.groups.groupSele = nil
+	return nil
+}
+
+func hasGroup(h *sshHost, group string) bool {
+	for _, g := range strings.Fields(h.GroupLabels) {
+		if strings.EqualFold(g, group) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectAllGroups() []*sshHost {
+	seen := make(map[string]bool)
+	var groups []*sshHost
+	for _, h := range userConfig.allHosts {
+		if h.System {
+			continue
+		}
+		for _, g := range strings.Fields(h.GroupLabels) {
+			low := strings.ToLower(g)
+			if !seen[low] {
+				seen[low] = true
+				groups = append(groups, &sshHost{Alias: g})
+			}
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		return strings.ToLower(groups[i].Alias) < strings.ToLower(groups[j].Alias)
+	})
+	return groups
+}
+
+func collectGroupNames() []string {
+	groups := collectAllGroups()
+	names := make([]string, len(groups))
+	for i, g := range groups {
+		names[i] = g.Alias
+	}
+	return names
+}
+
+func (m *hostModel) activateGroupPicker(form string) (tea.Model, tea.Cmd) {
+	names := collectGroupNames()
+	m.groupPicker.active = true
+	m.groupPicker.mode = "select"
+	m.groupPicker.cursor = 0
+	m.groupPicker.groups = names
+	m.groupPicker.input = ""
+	return m, nil
+}
+
+func (m *hostModel) handleGroupPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	txt := msg.Key().Text
+
+	if m.groupPicker.mode == "select" {
+		switch s {
+		case "up", "k":
+			if m.groupPicker.cursor > 0 {
+				m.groupPicker.cursor--
+			}
+			return m, nil
+		case "down", "j":
+			total := len(m.groupPicker.groups) + 1 // +1 for "New..."
+			if m.groupPicker.cursor < total-1 {
+				m.groupPicker.cursor++
+			}
+			return m, nil
+		case "enter":
+			totalGroups := len(m.groupPicker.groups)
+			if m.groupPicker.cursor < totalGroups {
+				// Select existing group
+				groupName := m.groupPicker.groups[m.groupPicker.cursor]
+				m.setGroupFieldValue(groupName)
+				m.groupPicker.active = false
+			} else {
+				// Select "New..."
+				m.groupPicker.mode = "new"
+				m.groupPicker.input = ""
+				m.groupPicker.cursor = 0
+			}
+			return m, nil
+		case "esc":
+			m.groupPicker.active = false
+			return m, nil
+		case "ctrl+c", "ctrl+q":
+			m.done = true
+			m.result = hostChoiceMsg{quit: true}
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
+	// mode == "new"
+	switch s {
+	case "enter":
+		name := strings.TrimSpace(m.groupPicker.input)
+		if name != "" {
+			m.setGroupFieldValue(name)
+		}
+		m.groupPicker.active = false
+		return m, nil
+	case "esc":
+		m.groupPicker.mode = "select"
+		m.groupPicker.cursor = 0
+		m.groupPicker.input = ""
+		return m, nil
+	case "backspace":
+		if len(m.groupPicker.input) > 0 {
+			m.groupPicker.input = m.groupPicker.input[:len(m.groupPicker.input)-1]
+		}
+		return m, nil
+	case "ctrl+c", "ctrl+q":
+		m.done = true
+		m.result = hostChoiceMsg{quit: true}
+		return m, tea.Quit
+	default:
+		if txt == "" {
+			return m, nil
+		}
+		m.groupPicker.input += txt
+		return m, nil
+	}
+}
+
+func (m *hostModel) setGroupFieldValue(groupName string) {
+	if m.edit.active {
+		for i := range m.edit.fields {
+			if m.edit.fields[i].kind == "group" {
+				m.edit.fields[i].value = groupName
+				return
+			}
+		}
+	}
+	if m.newHost.active {
+		for i := range m.newHost.fields {
+			if m.newHost.fields[i].kind == "group" {
+				m.newHost.fields[i].value = groupName
+				return
+			}
+		}
+	}
+}
+
+func (m *hostModel) renderGroupPicker(b *strings.Builder, maxLines int) {
+	if m.groupPicker.mode == "select" {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ── Select Group ──")) + "\n")
+		for i, name := range m.groupPicker.groups {
+			line := "  " + name
+			if i == m.groupPicker.cursor {
+				b.WriteString(m.bgLine(m.activeStyle.Render("▐█"+line)) + "\n")
+			} else {
+				b.WriteString(m.bgLine("  "+line) + "\n")
+			}
+		}
+		// "New..." at the end
+		newIdx := len(m.groupPicker.groups)
+		line := "  + New..."
+		if newIdx == m.groupPicker.cursor {
+			b.WriteString(m.bgLine(m.activeStyle.Render("▐█"+line)) + "\n")
+		} else {
+			b.WriteString(m.bgLine("  "+line) + "\n")
+		}
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.helpStyle.Render("  ↑↓ Navigate  Enter select  Esc back")) + "\n")
+		// Fill remaining
+		for i := len(m.groupPicker.groups) + 6; i < maxLines; i++ {
+			b.WriteString(m.bgLine("") + "\n")
+		}
+	} else {
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("  ── New Group Name ──")) + "\n")
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.activeStyle.Render("▐█ "+m.groupPicker.input+"▌")) + "\n")
+		b.WriteString(m.bgLine("") + "\n")
+		b.WriteString(m.bgLine(m.helpStyle.Render("  Enter create  Esc back")) + "\n")
+		for i := 6; i < maxLines; i++ {
+			b.WriteString(m.bgLine("") + "\n")
+		}
+	}
 }
 
 func removeHostFromConfig(alias string) {

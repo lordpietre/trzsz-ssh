@@ -414,54 +414,36 @@ func newHostModel(keywords string, hosts []*sshHost, termMgr terminalManager) *h
 }
 
 func (m *hostModel) initStyles() {
-	white := lipgloss.Color("15")
-	black := lipgloss.Color("0")
 	blue := lipgloss.Color("4")
 	grey := lipgloss.Color("8")
 	green := lipgloss.Color("10")
 
-	m.bgStyle = lipgloss.NewStyle().
-		Background(white).
-		Foreground(black)
+	m.bgStyle = lipgloss.NewStyle()
 	m.titleStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(blue).
 		Bold(true)
 	m.helpStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(grey)
 	m.labelStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(blue)
 	m.actionStyle = lipgloss.NewStyle().
-		Background(white).
-		Foreground(black).
 		Bold(true)
 	m.actionFocusStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(blue).
 		Bold(true).
 		Underline(true)
 	m.activeStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(blue).
 		Bold(true)
-	m.inactiveStyle = lipgloss.NewStyle().
-		Background(white).
-		Foreground(black)
+	m.inactiveStyle = lipgloss.NewStyle()
 	m.activeSeleStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(green).
 		Bold(true)
 	m.inactiveSeleStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(green).
 		Bold(true)
-	m.contextMenuStyle = lipgloss.NewStyle().
-		Background(white).
-		Foreground(black)
+	m.contextMenuStyle = lipgloss.NewStyle()
 	m.contextActStyle = lipgloss.NewStyle().
-		Background(white).
 		Foreground(blue).
 		Bold(true).
 		Underline(true)

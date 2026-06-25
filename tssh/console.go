@@ -62,21 +62,19 @@ type menuModel struct {
 }
 
 func initMenuModel(menuWidth, screenWidth int) *menuModel {
-	ncursesBg := lipgloss.Color("15")  // white
-	ncursesFg := lipgloss.Color("0")   // black
 	ncursesBlue := lipgloss.Color("4") // dark blue
 	ncursesGrey := lipgloss.Color("8") // grey
 	return &menuModel{
 		cursor:          0,
 		menuWidth:       menuWidth,
 		screenWidth:     screenWidth,
-		backgroundStyle: lipgloss.NewStyle().Background(ncursesBg).Width(screenWidth).Align(lipgloss.Center),
+		backgroundStyle: lipgloss.NewStyle().Width(screenWidth).Align(lipgloss.Center),
 		titleStyle:      lipgloss.NewStyle().Background(ncursesBlue).Foreground(lipgloss.Color("15")).Bold(true).Width(menuWidth).Align(lipgloss.Center),
-		footerStyle:     lipgloss.NewStyle().Foreground(ncursesGrey).Background(ncursesBg).Width(menuWidth).Align(lipgloss.Center),
-		blankLineStyle:  lipgloss.NewStyle().Background(ncursesBg).Width(menuWidth),
-		separatorStyle:  lipgloss.NewStyle().Foreground(ncursesGrey).Background(ncursesBg).Width(menuWidth),
+		footerStyle:     lipgloss.NewStyle().Foreground(ncursesGrey).Width(menuWidth).Align(lipgloss.Center),
+		blankLineStyle:  lipgloss.NewStyle().Width(menuWidth),
+		separatorStyle:  lipgloss.NewStyle().Foreground(ncursesGrey).Width(menuWidth),
 		activeItemStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(ncursesBlue),
-		normalItemStyle: lipgloss.NewStyle().Foreground(ncursesFg).Background(ncursesBg),
+		normalItemStyle: lipgloss.NewStyle().Width(menuWidth),
 		activeBarStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(ncursesBlue),
 	}
 }
@@ -129,10 +127,7 @@ func (m *menuModel) View() tea.View {
 		if w < m.screenWidth {
 			s += strings.Repeat(" ", m.screenWidth-w)
 		}
-		const resetSeq = "\x1b[0m"
-		const reApply = "\x1b[0m\x1b[47m\x1b[30m"
-		s = strings.ReplaceAll(s, resetSeq, reApply)
-		return "\x1b[47m\x1b[30m" + s + resetSeq
+		return s
 	}
 
 	// top border

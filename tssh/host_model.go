@@ -205,6 +205,7 @@ type hostModel struct {
 	upload             uploadState
 	groups             groupsState
 	groupPicker        groupPickerState
+	frp                frpProxyState
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -309,6 +310,18 @@ func (m *hostModel) getContextItems() []contextItem {
 			m.tunnel.tunnels = tunnelLoadConfig(m.tunnel.tunnelConfigPath, alias)
 			return m, nil
 		}},
+		{"FRP Proxy", func() (tea.Model, tea.Cmd) {
+			m.showContextMenu = false
+			m.frp.active = true
+			m.frp.view = "menu"
+			m.frp.alias = alias
+			m.frp.entries = frpLoadConfig(m.frp.configPath, alias)
+			m.frp.cursor = 0
+			m.frp.delMode = false
+			m.frp.direction = ""
+			m.frp.setupErr = ""
+			return m, nil
+		}},
 		{"Group", func() (tea.Model, tea.Cmd) {
 			m.showContextMenu = false
 			if alias == "" {
@@ -398,6 +411,7 @@ func newHostModel(keywords string, hosts []*sshHost, termMgr terminalManager) *h
 		tunnel: tunnelState{
 			tunnelConfigPath: tunnelDefaultPath(),
 		},
+		frp: initFrpState(),
 	}
 	m.loadMetaIntoHosts()
 	m.initStyles()
@@ -560,6 +574,61 @@ func (m *hostModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tunnelSaveConfig(m.tunnel.tunnels, m.tunnel.tunnelConfigPath)
 		}
 		return m, nil
+	case frpSetupProgressMsg:
+		if msg.err != nil {
+			m.frp.setupErr = msg.err.Error()
+			m.frp.setupStep = msg.step
+		} else if msg.step == "ready" {
+			// setup complete, scan ports
+			m.frp.scanPorts = nil
+			m.frp.scanErr = ""
+			m.frp.scanCursor = 0
+			m.frp.view = "scan_results"
+			if m.frp.direction == "r2l" {
+				return m, tunnelScanRemote(m.frp.alias)
+			}
+			return m, frpScanLocalPorts()
+		} else {
+			m.frp.setupStep = msg.step
+			m.frp.setupErr = ""
+		}
+		return m, nil
+	case frpScanResultMsg:
+		if msg.err != nil {
+			m.frp.scanErr = msg.err.Error()
+		} else {
+			m.frp.scanPorts = msg.ports
+			m.frp.scanErr = ""
+		}
+		m.frp.view = "scan_results"
+		return m, nil
+	case frpStartResultMsg:
+		if msg.err != nil {
+			m.frp.setupErr = msg.err.Error()
+			if m.frp.view == "setup" {
+				m.frp.view = "list"
+			}
+		} else {
+			m.frp.entries = append(m.frp.entries, msg.entry)
+			m.frp.view = "list"
+			m.frp.setupErr = ""
+			frpSaveConfig(m.frp.entries, m.frp.configPath)
+		}
+		return m, nil
+	case frpStopResultMsg:
+		if msg.err == nil {
+			var keep []*frpProxyEntry
+			for _, e := range m.frp.entries {
+				if e != msg.entry {
+					keep = append(keep, e)
+				}
+			}
+			m.frp.entries = keep
+			frpSaveConfig(m.frp.entries, m.frp.configPath)
+		} else {
+			m.frp.setupErr = msg.err.Error()
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -573,6 +642,9 @@ func (m *hostModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.tunnel.active {
 		return m.handleTunnel(msg)
+	}
+	if m.frp.active {
+		return m.handleFrp(msg)
 	}
 	if m.edit.active {
 		return m.handleEdit(msg)
@@ -1270,6 +1342,8 @@ func (m *hostModel) View() tea.View {
 		m.renderDeleteAsk(&b, availableHeight+detailLines+2)
 	} else if m.tunnel.active {
 		m.renderTunnelView(&b, availableHeight+detailLines+2)
+	} else if m.frp.active {
+		m.renderFrpView(&b, availableHeight+detailLines+2)
 	} else if m.showHelp {
 		// --- help overlay instead of host list ---
 		m.renderHelp(&b, availableHeight)
@@ -1617,24 +1691,42 @@ func (m *hostModel) renderContextMenu(b *strings.Builder, maxLines int) {
 	titleLine := clipString(title, width)
 	b.WriteString(m.bgLine(m.activeStyle.Render(titleLine)) + "\n")
 
-	// menu items
-	for i, item := range items {
-		if maxLines > 0 && i > maxLines-1 {
-			break
-		}
-		icon := "  "
+	// scrollable menu items
+	totalItems := len(items)
+	availableLines := maxLines - 1 // reserve 1 for title
+	if availableLines < 1 {
+		availableLines = 1
+	}
+	scrollOffset := 0
+	if m.contextCursor >= availableLines {
+		scrollOffset = m.contextCursor - availableLines + 1
+	}
+
+	rendered := 0
+	for i := scrollOffset; i < totalItems && rendered < availableLines; i++ {
+		item := items[i]
+		label := "  " + item.label + "  "
 		if i == m.contextCursor {
-			icon = "▐█ " // ncurses cursor
-			label := icon + item.label + "  "
+			label = "▐█ " + item.label + "  "
 			b.WriteString(m.bgLine(m.activeStyle.Render(clipString(label, width))) + "\n")
 		} else {
-			label := icon + item.label + "  "
 			b.WriteString(m.bgLine(m.inactiveStyle.Render(clipString(label, width))) + "\n")
 		}
+		rendered++
+	}
+
+	// indicator if items are scrolled
+	if scrollOffset > 0 {
+		b.WriteString(m.bgLine(m.helpStyle.Render("  ↑ more...")) + "\n")
+		rendered++
+	}
+	if scrollOffset+availableLines < totalItems {
+		b.WriteString(m.bgLine(m.helpStyle.Render("  ↓ more...")) + "\n")
+		rendered++
 	}
 
 	// fill remaining lines
-	for i := len(items); i < maxLines; i++ {
+	for i := rendered + 1; i < maxLines; i++ {
 		b.WriteString(m.bgLine("") + "\n")
 	}
 }

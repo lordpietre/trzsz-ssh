@@ -28,3 +28,6 @@ vendor/
 
 agext.md
 
+# Embedded git repository (source for compiled frps/frpc)
+/frp/
+

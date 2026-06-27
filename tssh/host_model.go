@@ -206,6 +206,9 @@ type hostModel struct {
 	groups             groupsState
 	groupPicker        groupPickerState
 	frp                frpProxyState
+	detailsAlias       string // cached alias for tunnel/frp details
+	detailsTunnels     []*tunnelEntry
+	detailsFrp         []*frpProxyEntry
 	deleteAsk          bool
 	deleteIdx          int
 	titleStyle         lipgloss.Style
@@ -1672,6 +1675,83 @@ func (m *hostModel) renderDetails(b *strings.Builder, h *sshHost, maxLines int) 
 		}
 		if value != "" {
 			line := fmt.Sprintf("  %s:  %s", item, value)
+			line = clipString(line, width)
+			b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
+			written++
+		}
+	}
+
+	if maxLines > 0 && written >= maxLines {
+		return
+	}
+
+	// Load tunnel/FRP info when alias changes
+	if m.detailsAlias != h.Alias {
+		m.detailsAlias = h.Alias
+		m.detailsTunnels = tunnelLoadConfig(tunnelDefaultPath(), h.Alias)
+		m.detailsFrp = frpLoadConfig(frpDefaultPath(), h.Alias)
+	}
+
+	// Show FRP proxies
+	frpActive := 0
+	frpInactive := 0
+	for _, e := range m.detailsFrp {
+		if e.Active {
+			frpActive++
+		} else {
+			frpInactive++
+		}
+	}
+	if frpActive+frpInactive > 0 && (maxLines <= 0 || written < maxLines) {
+		title := fmt.Sprintf("  FRP Proxies (%d):", frpActive+frpInactive)
+		b.WriteString(m.bgLine(m.helpStyle.Render(clipString(title, width))) + "\n")
+		written++
+		for _, e := range m.detailsFrp {
+			if maxLines > 0 && written >= maxLines {
+				break
+			}
+			direction := "R2L"
+			if e.Direction == "l2r" {
+				direction = "L2R"
+			}
+			status := ""
+			if e.Active {
+				status = " [ACTIVE]"
+			}
+			line := fmt.Sprintf("  · [%s] %s → %s:%d%s", direction, e.Name, e.FrpsAddr, e.ExposedPort, status)
+			line = clipString(line, width)
+			b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
+			written++
+		}
+	}
+
+	// Show SSH tunnels
+	tunActive := 0
+	tunInactive := 0
+	for _, t := range m.detailsTunnels {
+		if t.Active {
+			tunActive++
+		} else {
+			tunInactive++
+		}
+	}
+	if tunActive+tunInactive > 0 && (maxLines <= 0 || written < maxLines) {
+		title := fmt.Sprintf("  Tunnels (%d):", tunActive+tunInactive)
+		b.WriteString(m.bgLine(m.helpStyle.Render(clipString(title, width))) + "\n")
+		written++
+		for _, t := range m.detailsTunnels {
+			if maxLines > 0 && written >= maxLines {
+				break
+			}
+			fwdType := t.ForwardType
+			if fwdType == "" {
+				fwdType = "L"
+			}
+			status := ""
+			if t.Active {
+				status = " [ACTIVE]"
+			}
+			line := fmt.Sprintf("  · [%s] :%s → localhost:%s (%s)%s", fwdType, t.LocalPort, t.RemotePort, t.Mode, status)
 			line = clipString(line, width)
 			b.WriteString(m.bgLine(m.helpStyle.Render(line)) + "\n")
 			written++

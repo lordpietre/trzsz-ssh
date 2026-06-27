@@ -201,62 +201,6 @@ func frpFindBin(name string) string {
 	return ""
 }
 
-func frpCompileIfNeeded() error {
-	if frpFindBin("frps") != "" && frpFindBin("frpc") != "" {
-		return nil
-	}
-	// find frp source directory
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot locate executable: %v", err)
-	}
-	exeDir := filepath.Dir(exe)
-	srcDir := filepath.Join(exeDir, "frp")
-	if _, err := os.Stat(filepath.Join(srcDir, "go.mod")); err != nil {
-		// try cwd
-		if cwd, err := os.Getwd(); err == nil {
-			srcDir = filepath.Join(cwd, "frp")
-			if _, err2 := os.Stat(filepath.Join(srcDir, "go.mod")); err2 != nil {
-				return fmt.Errorf("cannot find frp source directory (searched %s and %s)", filepath.Join(exeDir, "frp"), filepath.Join(cwd, "frp"))
-			}
-		} else {
-			return fmt.Errorf("cannot find frp source directory: %v", err)
-		}
-	}
-	home, _ := os.UserHomeDir()
-	binDir := filepath.Join(home, ".tssh", "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		return fmt.Errorf("cannot create bin directory: %v", err)
-	}
-	// compile frps
-	if frpFindBin("frps") == "" {
-		cmd := exec.Command("go", "build",
-			"-tags", "noweb",
-			"-o", filepath.Join(binDir, "frps"),
-			"-ldflags", "-s -w",
-			filepath.Join(srcDir, "cmd", "frps"))
-		cmd.Dir = srcDir
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("compile frps failed: %v\n%s", err, out)
-		}
-	}
-	// compile frpc
-	if frpFindBin("frpc") == "" {
-		cmd := exec.Command("go", "build",
-			"-tags", "noweb",
-			"-o", filepath.Join(binDir, "frpc"),
-			"-ldflags", "-s -w",
-			filepath.Join(srcDir, "cmd", "frpc"))
-		cmd.Dir = srcDir
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("compile frpc failed: %v\n%s", err, out)
-		}
-	}
-	return nil
-}
-
 // --- Config file generation ---
 
 func writeFrpsConfig(alias string, token string, bindPort int) (string, error) {
@@ -485,9 +429,9 @@ func frpStopProcess(cmd *exec.Cmd) error {
 
 func frpSetupCmd(alias string, direction string) tea.Cmd {
 	return func() tea.Msg {
-		// Step 1: compile binaries
-		if err := frpCompileIfNeeded(); err != nil {
-			return frpSetupProgressMsg{step: fmt.Sprintf("Compile failed: %v", err), err: err}
+		// Step 1: ensure FRP binaries are available
+		if err := frpDownloadIfNeeded(); err != nil {
+			return frpSetupProgressMsg{step: fmt.Sprintf("Setup failed: %v", err), err: err}
 		}
 
 		token := generateToken()
